@@ -20,8 +20,9 @@ function logAvailableFeeds(span: Span): void {
   }
   logger.info(`Available feeds (${senders.length}):`, span);
   for (const s of senders) {
+    const id = EmailSenderGetId(s.senderName);
     logger.info(
-      `  - [${EmailSenderGetId(s.senderName)}] ${s.senderName} <${s.senderEmail}>`,
+      ` - [${id}] ${s.senderName} <${s.senderEmail}> ${config.PUBLIC_URL}/rss/${id}`,
       span,
     );
   }

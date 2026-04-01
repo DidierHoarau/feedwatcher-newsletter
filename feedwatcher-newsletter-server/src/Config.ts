@@ -35,6 +35,9 @@ export class Config implements ConfigOTelInterface {
   // Retention: keep emails for 3 days by default
   public EMAIL_RETENTION_DAYS = 7;
 
+  // Public URL of the service
+  public PUBLIC_URL = "http://localhost:8080";
+
   constructor() {
     let version = "1";
     try {
@@ -91,5 +94,6 @@ export class Config implements ConfigOTelInterface {
     setIfSet("IMAP_MAILBOX");
     setIfSet("EMAIL_FETCH_CRON");
     setIfSet("EMAIL_RETENTION_DAYS");
+    setIfSet("PUBLIC_URL");
   }
 }
