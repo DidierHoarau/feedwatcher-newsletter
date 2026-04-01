@@ -1,0 +1,64 @@
+name: PR Check
+
+on:
+  pull_request:
+    branches: ["main"]
+
+  workflow_dispatch:
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        folder: ["."]
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-east-1
+
+      - name: Check Artifact
+        run: |
+          set -e
+          cd ${{ matrix.folder }}
+          export SERVICE_NAME=$(cat package.json | jq -r ".name")
+          export SERVICE_VERSION=$(cat package.json | jq -r ".version")
+          rm -f .hash*
+          HASH=$(find . -type f -exec md5sum {} \; | sort -k 2 | md5sum | cut -f1 -d" ")
+          echo ${HASH} > .hash
+          touch .hash_known
+          aws s3 cp --quiet "s3://didier-cloud-devops/artifacts/${SERVICE_NAME}_${SERVICE_VERSION}.hash" .hash_known || true
+          HASH_KNOWN=$(cat .hash_known | head -n1)
+          if [ "${HASH}" = "${HASH_KNOWN}" ]; then
+            echo "Already Built: ${SERVICE_NAME}:${SERVICE_VERSION}"
+            touch .hash_nobuild
+          else 
+            echo "To be built: ${SERVICE_NAME}:${SERVICE_VERSION}"
+          fi
+
+      - name: Docker Build
+        run: |
+          set -e
+          cd ${{ matrix.folder }}
+          if [ -f .hash_nobuild ]; then exit 0 ; fi
+          DOCKER_REGISTRY='309990189147.dkr.ecr.ap-east-1.amazonaws.com'
+          REGISTRY_NAMESPACE='feedwatcher-newsletter'
+          export SERVICE=$(cat package.json | jq -r ".name")
+          export SERVICE_VERSION="PR"
+          aws ecr create-repository \
+              --repository-name ${REGISTRY_NAMESPACE}/${SERVICE} \
+              --image-scanning-configuration scanOnPush=true || true
+          aws ecr get-login-password --region ap-east-1 | docker login --username AWS --password-stdin 309990189147.dkr.ecr.ap-east-1.amazonaws.com
+          DOCKER_TAG=${DOCKER_REGISTRY}/${REGISTRY_NAMESPACE}/${SERVICE}:${SERVICE_VERSION}
+          docker build -t ${DOCKER_TAG} .
+          docker push ${DOCKER_TAG}

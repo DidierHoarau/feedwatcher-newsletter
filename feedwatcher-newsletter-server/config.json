@@ -1,0 +1,10 @@
+{
+  "CORS_POLICY_ORIGIN": "*",
+  "IMAP_HOST": "imap.example.com",
+  "IMAP_PORT": 993,
+  "IMAP_TLS": true,
+  "IMAP_USER": "newsletter@example.com",
+  "IMAP_PASSWORD": "password",
+  "IMAP_MAILBOX": "INBOX",
+  "EMAIL_RETENTION_DAYS": 3
+}
