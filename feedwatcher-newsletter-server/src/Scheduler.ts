@@ -33,7 +33,7 @@ export async function SchedulerInit(context: Span, configIn: Config) {
   const span = OTelTracer().startSpan("SchedulerInit", context);
   config = configIn;
 
-  EmailsDataInit(Number(config.EMAIL_RETENTION_DAYS));
+  EmailsDataInit(Number(config.EMAIL_RETENTION_DAYS), config.DATA_DIR);
 
   logger.info(
     `Scheduling email fetch with cron: ${config.EMAIL_FETCH_CRON}`,

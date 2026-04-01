@@ -33,7 +33,7 @@ export class Config implements ConfigOTelInterface {
   public EMAIL_FETCH_CRON = "0 * * * *";
 
   // Retention: keep emails for 3 days by default
-  public EMAIL_RETENTION_DAYS = 3;
+  public EMAIL_RETENTION_DAYS = 7;
 
   constructor() {
     let version = "1";

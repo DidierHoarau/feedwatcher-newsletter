@@ -15,7 +15,7 @@ module.exports = {
       env_development: {
         ...devEnv,
         DEV_MODE: "true",
-        DATA_DIR: "../data",
+        DATA_DIR: "../docs/dev/data",
       },
     },
   ],
