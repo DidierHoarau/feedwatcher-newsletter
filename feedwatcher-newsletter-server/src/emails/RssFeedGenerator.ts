@@ -32,7 +32,7 @@ export function RssFeedGeneratorBuildFeedById(
       guid: email.id,
       date: email.dateReceived,
       custom_elements: [
-        { "newsletter:id": email.id },
+        { content: email.body },
         { "newsletter:messageId": email.messageId },
         { "newsletter:senderName": email.senderName },
         { "newsletter:senderEmail": email.senderEmail },
