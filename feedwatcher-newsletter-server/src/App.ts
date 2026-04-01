@@ -10,7 +10,6 @@ import {
   OTelTracer,
 } from "./OTelContext";
 import { SchedulerInit } from "./Scheduler";
-import { NewsletterRoutes } from "./newsletter/NewsletterRoutes";
 import { RssRoutes } from "./rss/RssRoutes";
 
 const logger = OTelLogger().createModuleLogger("app");
@@ -50,10 +49,6 @@ Promise.resolve().then(async () => {
 
   fastify.register(new RssRoutes().getRoutes, {
     prefix: "/rss",
-  });
-
-  fastify.register(new NewsletterRoutes().getRoutes, {
-    prefix: "/api/newsletter",
   });
 
   fastify.listen({ port: config.API_PORT, host: "0.0.0.0" }, (err) => {
