@@ -101,64 +101,17 @@ export async function EmailFetcherFetchEmails(
                       senderName = from.name || from.address || senderName;
                     }
 
-                    // Prefer HTML body, fall back to plain text converted to HTML
-                    let body: string;
-                    if (parsed.html) {
-                      body = sanitizeHtml(parsed.html, {
-                        allowedTags: sanitizeHtml.defaults.allowedTags.concat([
-                          "img",
-                          "h1",
-                          "h2",
-                          "h3",
-                          "h4",
-                          "h5",
-                          "h6",
-                          "figure",
-                          "figcaption",
-                          "picture",
-                          "source",
-                        ]),
-                        allowedAttributes: {
-                          ...sanitizeHtml.defaults.allowedAttributes,
-                          "*": ["style", "class", "align"],
-                          a: ["href", "name", "target", "rel"],
-                          img: ["src", "alt", "width", "height", "style"],
-                          td: [
-                            "colspan",
-                            "rowspan",
-                            "width",
-                            "align",
-                            "valign",
-                            "bgcolor",
-                            "style",
-                          ],
-                          th: [
-                            "colspan",
-                            "rowspan",
-                            "width",
-                            "align",
-                            "valign",
-                            "style",
-                          ],
-                          table: [
-                            "width",
-                            "cellpadding",
-                            "cellspacing",
-                            "border",
-                            "align",
-                            "style",
-                          ],
-                        },
-                        allowedSchemes: ["http", "https", "mailto", "cid"],
-                        disallowedTagsMode: "discard",
-                      });
-                    } else {
-                      // Convert plain text to basic HTML paragraphs
-                      body = (parsed.text || "")
-                        .split(/\n\n+/)
-                        .map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`)
-                        .join("\n");
-                    }
+                    // Strip all HTML, keeping only links and images
+                    const rawHtml = parsed.html || (parsed.text || "").replace(/\n/g, "<br>");
+                    const body = sanitizeHtml(rawHtml, {
+                      allowedTags: ["a", "img"],
+                      allowedAttributes: {
+                        a: ["href", "target", "rel"],
+                        img: ["src", "alt", "width", "height"],
+                      },
+                      allowedSchemes: ["http", "https", "mailto"],
+                      disallowedTagsMode: "discard",
+                    });
 
                     const emailItem: EmailItem = {
                       id: uuidv4(),
