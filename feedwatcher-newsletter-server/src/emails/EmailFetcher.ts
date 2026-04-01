@@ -1,6 +1,5 @@
 import Imap from "imap";
 import { simpleParser } from "mailparser";
-import sanitizeHtml from "sanitize-html";
 import { Span } from "@opentelemetry/sdk-trace-base";
 import { v4 as uuidv4 } from "uuid";
 import { Config } from "../Config";
@@ -101,17 +100,8 @@ export async function EmailFetcherFetchEmails(
                       senderName = from.name || from.address || senderName;
                     }
 
-                    // Strip all HTML, keeping only links and images
-                    const rawHtml = parsed.html || (parsed.text || "").replace(/\n/g, "<br>");
-                    const body = sanitizeHtml(rawHtml, {
-                      allowedTags: ["a", "img"],
-                      allowedAttributes: {
-                        a: ["href", "target", "rel"],
-                        img: ["src", "alt", "width", "height"],
-                      },
-                      allowedSchemes: ["http", "https", "mailto"],
-                      disallowedTagsMode: "discard",
-                    });
+                    // Use the email body as-is, preferring HTML over plain text
+                    const body = parsed.html || parsed.text || "";
 
                     const emailItem: EmailItem = {
                       id: uuidv4(),
