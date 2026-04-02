@@ -1,0 +1,7 @@
+/tmp
+/*/node_modules
+/*/dist
+/builds
+node_modules/
+coverage
+/env-dev.js
