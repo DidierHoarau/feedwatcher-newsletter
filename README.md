@@ -1,1 +1,3 @@
 # feedwatcher-newsletter
+
+# Installation
