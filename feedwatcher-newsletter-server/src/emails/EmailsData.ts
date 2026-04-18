@@ -45,7 +45,6 @@ export function EmailsDataInit(
 }
 
 export function EmailItemSave(item: EmailItem): void {
-  logger.info(`Storing email to file: ${item.id}`);
   const store = loadStore();
   store.set(item.messageId, item);
   saveStore(store);

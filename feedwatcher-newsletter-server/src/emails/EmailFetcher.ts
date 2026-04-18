@@ -7,6 +7,7 @@ import { OTelLogger, OTelTracer } from "../OTelContext";
 import {
   EmailItemSave,
   EmailItemExistsByMessageId,
+  EmailItemsListById,
   EmailSenderGetId,
 } from "./EmailsData";
 
@@ -117,11 +118,15 @@ export async function EmailFetcherFetchEmails(
                     };
 
                     const senderId = EmailSenderGetId(senderName);
+                    const isKnownSender =
+                      EmailItemsListById(senderId).length > 0;
                     EmailItemSave(emailItem);
-                    logger.info(
-                      `Saved email from ${senderName} <${senderEmail}> [id: ${senderId}]: ${emailItem.subject}`,
-                      span,
-                    );
+                    if (!isKnownSender) {
+                      logger.info(
+                        `Saved first email from ${senderName} <${senderEmail}> [id: ${senderId}]: ${emailItem.subject}`,
+                        span,
+                      );
+                    }
                   } catch (parseError) {
                     logger.error(
                       `Error parsing email`,

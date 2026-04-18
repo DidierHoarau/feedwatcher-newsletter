@@ -15,14 +15,13 @@ const logger = OTelLogger().createModuleLogger("Scheduler");
 function logAvailableFeeds(span: Span): void {
   const senders = EmailSendersListAll();
   if (senders.length === 0) {
-    logger.info("Available feeds: none", span);
+    logger.info("No RSS feeds", span);
     return;
   }
-  logger.info(`Available feeds (${senders.length}):`, span);
   for (const s of senders) {
     const id = EmailSenderGetId(s.senderName);
     logger.info(
-      ` - [${id}] ${s.senderName} <${s.senderEmail}> ${config.PUBLIC_URL}/rss/${id}`,
+      `RSS Feed: [${id}] ${s.senderName} <${s.senderEmail}> ${config.PUBLIC_URL}/rss/${id}`,
       span,
     );
   }
