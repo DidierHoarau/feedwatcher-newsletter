@@ -5,9 +5,8 @@ import { v4 as uuidv4 } from "uuid";
 import { Config } from "../Config";
 import { OTelLogger, OTelTracer } from "../OTelContext";
 import {
-  EmailItemSave,
+  EmailItemsBatchSave,
   EmailItemExistsByMessageId,
-  EmailItemsListById,
   EmailSenderGetId,
 } from "./EmailsData";
 
@@ -70,75 +69,27 @@ export async function EmailFetcherFetchEmails(
 
           logger.info(`Found ${uids.length} emails`, span);
 
+          // Collect raw email buffers as they stream in, then parse sequentially
+          // to avoid holding all raw email strings in memory simultaneously.
+          const rawEmails: string[] = [];
           const fetch = imap.fetch(uids, { bodies: "" });
-          const parsePromises: Promise<void>[] = [];
+          const streamPromises: Promise<void>[] = [];
 
-          fetch.on("message", (msg) => {
-            const parsePromise = new Promise<void>((msgResolve) => {
+          fetch.on("message", (_msg, seqno) => {
+            const streamPromise = new Promise<void>((msgResolve) => {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               let rawEmail = "";
-              msg.on("body", (stream) => {
+              _msg.on("body", (stream) => {
                 stream.on("data", (chunk) => {
                   rawEmail += chunk.toString("utf8");
                 });
-                stream.once("end", async () => {
-                  try {
-                    const parsed = await simpleParser(rawEmail);
-                    const messageId = parsed.messageId || `no-id-${Date.now()}`;
-
-                    const alreadyExists = EmailItemExistsByMessageId(messageId);
-                    if (alreadyExists) {
-                      msgResolve();
-                      return;
-                    }
-
-                    // Extract sender name and email
-                    let senderName = "Unknown";
-                    let senderEmail = "unknown@unknown.com";
-                    if (parsed.from && parsed.from.value.length > 0) {
-                      const from = parsed.from.value[0];
-                      senderEmail = from.address || senderEmail;
-                      senderName = from.name || from.address || senderName;
-                    }
-
-                    // Use the email body as-is, preferring HTML over plain text
-                    const body = parsed.html || parsed.text || "";
-
-                    const emailItem: EmailItem = {
-                      id: uuidv4(),
-                      messageId,
-                      senderName,
-                      senderEmail,
-                      subject: parsed.subject || "(no subject)",
-                      body,
-                      dateReceived: parsed.date
-                        ? parsed.date.toISOString()
-                        : new Date().toISOString(),
-                      dateCreated: new Date().toISOString(),
-                    };
-
-                    const senderId = EmailSenderGetId(senderName);
-                    const isKnownSender =
-                      EmailItemsListById(senderId).length > 0;
-                    EmailItemSave(emailItem);
-                    if (!isKnownSender) {
-                      logger.info(
-                        `Saved first email from ${senderName} <${senderEmail}> [id: ${senderId}]: ${emailItem.subject}`,
-                        span,
-                      );
-                    }
-                  } catch (parseError) {
-                    logger.error(
-                      `Error parsing email`,
-                      parseError as Error,
-                      span,
-                    );
-                  }
+                stream.once("end", () => {
+                  rawEmails[seqno] = rawEmail;
                   msgResolve();
                 });
               });
             });
-            parsePromises.push(parsePromise);
+            streamPromises.push(streamPromise);
           });
 
           fetch.once("error", (fetchErr) => {
@@ -146,7 +97,70 @@ export async function EmailFetcherFetchEmails(
           });
 
           fetch.once("end", async () => {
-            await Promise.all(parsePromises);
+            // Wait for all stream reads to complete
+            await Promise.all(streamPromises);
+
+            // Parse and process emails sequentially to keep memory flat
+            const newItems: EmailItem[] = [];
+            const newSenderIds = new Set<string>();
+
+            for (const rawEmail of rawEmails) {
+              if (!rawEmail) continue;
+              try {
+                const parsed = await simpleParser(rawEmail);
+                const messageId = parsed.messageId || `no-id-${Date.now()}`;
+
+                if (EmailItemExistsByMessageId(messageId)) {
+                  continue;
+                }
+
+                // Extract sender name and email
+                let senderName = "Unknown";
+                let senderEmail = "unknown@unknown.com";
+                if (parsed.from && parsed.from.value.length > 0) {
+                  const from = parsed.from.value[0];
+                  senderEmail = from.address || senderEmail;
+                  senderName = from.name || from.address || senderName;
+                }
+
+                // Use the email body as-is, preferring HTML over plain text
+                const body = parsed.html || parsed.text || "";
+
+                const emailItem: EmailItem = {
+                  id: uuidv4(),
+                  messageId,
+                  senderName,
+                  senderEmail,
+                  subject: parsed.subject || "(no subject)",
+                  body,
+                  dateReceived: parsed.date
+                    ? parsed.date.toISOString()
+                    : new Date().toISOString(),
+                  dateCreated: new Date().toISOString(),
+                };
+
+                const senderId = EmailSenderGetId(senderName);
+                const isNewSender = !newSenderIds.has(senderId);
+                newSenderIds.add(senderId);
+                newItems.push(emailItem);
+
+                if (isNewSender) {
+                  logger.info(
+                    `New email from ${senderName} <${senderEmail}> [id: ${senderId}]: ${emailItem.subject}`,
+                    span,
+                  );
+                }
+              } catch (parseError) {
+                logger.error(`Error parsing email`, parseError as Error, span);
+              }
+            }
+
+            // Persist all new emails in a single write
+            EmailItemsBatchSave(newItems);
+            if (newItems.length > 0) {
+              logger.info(`Saved ${newItems.length} new email(s)`, span);
+            }
+
             imap.end();
             span.end();
             resolve();

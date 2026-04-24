@@ -8,8 +8,8 @@ const logger = OTelLogger().createModuleLogger("EmailsData");
 let retentionDays = 3;
 let dataFilePath = "";
 
-// Load the email store from the JSON file, returning a Map keyed by messageId
-function loadStore(): Map<string, EmailItem> {
+// Read all records from disk. Never held in memory between calls.
+function readStore(): Map<string, EmailItem> {
   try {
     if (fse.existsSync(dataFilePath)) {
       const records: EmailItem[] = fse.readJsonSync(dataFilePath);
@@ -24,8 +24,8 @@ function loadStore(): Map<string, EmailItem> {
   return new Map();
 }
 
-// Persist the email store to the JSON file
-function saveStore(store: Map<string, EmailItem>): void {
+// Write records to disk and release the Map immediately.
+function writeStore(store: Map<string, EmailItem>): void {
   try {
     fse.ensureDirSync(path.dirname(dataFilePath));
     fse.writeJsonSync(dataFilePath, Array.from(store.values()), { spaces: 2 });
@@ -44,14 +44,18 @@ export function EmailsDataInit(
   logger.info(`Email data file: ${dataFilePath}`);
 }
 
-export function EmailItemSave(item: EmailItem): void {
-  const store = loadStore();
-  store.set(item.messageId, item);
-  saveStore(store);
+// Save multiple items at once: one read + one write, then drop the Map.
+export function EmailItemsBatchSave(items: EmailItem[]): void {
+  if (items.length === 0) return;
+  const store = readStore();
+  for (const item of items) {
+    store.set(item.messageId, item);
+  }
+  writeStore(store);
 }
 
 export function EmailItemExistsByMessageId(messageId: string): boolean {
-  return loadStore().has(messageId);
+  return readStore().has(messageId);
 }
 
 export function EmailSenderGetId(senderName: string): string {
@@ -62,7 +66,7 @@ export function EmailSenderGetId(senderName: string): string {
 }
 
 export function EmailItemsListById(id: string): EmailItem[] {
-  return Array.from(loadStore().values())
+  return Array.from(readStore().values())
     .filter((e) => EmailSenderGetId(e.senderName) === id)
     .sort(
       (a, b) =>
@@ -71,7 +75,7 @@ export function EmailItemsListById(id: string): EmailItem[] {
 }
 
 export function EmailItemsListBySender(senderName: string): EmailItem[] {
-  return Array.from(loadStore().values())
+  return Array.from(readStore().values())
     .filter((e) => e.senderName === senderName)
     .sort(
       (a, b) =>
@@ -84,7 +88,7 @@ export function EmailSendersListAll(): {
   senderEmail: string;
 }[] {
   const seen = new Map<string, string>();
-  for (const e of loadStore().values()) {
+  for (const e of readStore().values()) {
     if (!seen.has(e.senderName)) {
       seen.set(e.senderName, e.senderEmail);
     }
@@ -95,14 +99,14 @@ export function EmailSendersListAll(): {
 }
 
 export function EmailItemsListAll(): EmailItem[] {
-  return Array.from(loadStore().values()).sort(
+  return Array.from(readStore().values()).sort(
     (a, b) =>
       new Date(b.dateReceived).getTime() - new Date(a.dateReceived).getTime(),
   );
 }
 
 export function EmailsDataPurgeExpired(): void {
-  const store = loadStore();
+  const store = readStore();
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
   let purged = 0;
   for (const [messageId, item] of store.entries()) {
@@ -112,7 +116,7 @@ export function EmailsDataPurgeExpired(): void {
     }
   }
   if (purged > 0) {
-    saveStore(store);
+    writeStore(store);
     logger.info(
       `Purged ${purged} expired email(s) older than ${retentionDays} day(s)`,
     );
