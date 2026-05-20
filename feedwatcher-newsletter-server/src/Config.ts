@@ -35,6 +35,9 @@ export class Config implements ConfigOTelInterface {
   // Retention: keep emails for 3 days by default
   public EMAIL_RETENTION_DAYS = 7;
 
+  // Batch: max emails to process per fetch (prevents unbounded run time)
+  public EMAIL_FETCH_BATCH_SIZE = 200;
+
   // Public URL of the service
   public PUBLIC_URL = "http://localhost:8080";
 
@@ -94,6 +97,7 @@ export class Config implements ConfigOTelInterface {
     setIfSet("IMAP_MAILBOX");
     setIfSet("EMAIL_FETCH_CRON");
     setIfSet("EMAIL_RETENTION_DAYS");
+    setIfSet("EMAIL_FETCH_BATCH_SIZE");
     setIfSet("PUBLIC_URL");
   }
 }
