@@ -19,10 +19,10 @@ logger.info("====== Starting FeedWatcher Newsletter Server ======");
 Promise.resolve().then(async () => {
   //
   const config = new Config();
-  await config.reload();
+  await config.reload((msg) => logger.info(msg));
   watchFile(config.CONFIG_FILE, () => {
     logger.info(`Config updated: ${config.CONFIG_FILE}`);
-    config.reload();
+    config.reload((msg) => logger.info(msg));
   });
 
   OTelSetTracer(new StandardTracer(config));
