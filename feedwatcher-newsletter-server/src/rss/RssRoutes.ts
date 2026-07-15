@@ -1,4 +1,5 @@
 import { FastifyInstance } from "fastify";
+import { Span } from "@opentelemetry/sdk-trace-base";
 import { OTelLogger, OTelRequestSpan } from "../OTelContext";
 import { EmailSendersListAll, EmailSenderGetId } from "../emails/EmailsData";
 import { RssFeedGeneratorBuildFeedById } from "../emails/RssFeedGenerator";
@@ -28,7 +29,7 @@ export class RssRoutes {
       logger.info(`Generating RSS feed for id: ${id}`, span);
 
       const baseUrl = `${request.protocol}://${request.hostname}`;
-      const xml = RssFeedGeneratorBuildFeedById(span, id, baseUrl);
+      const xml = RssFeedGeneratorBuildFeedById(span as Span, id, baseUrl);
 
       reply.header("Content-Type", "application/rss+xml; charset=utf-8");
       return reply.send(xml);

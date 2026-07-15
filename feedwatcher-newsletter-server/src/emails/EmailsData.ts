@@ -122,3 +122,39 @@ export function EmailsDataPurgeExpired(): void {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Incremental IMAP UID tracking — persist last processed UID so subsequent
+// fetches only retrieve messages newer than the previous run.
+// ---------------------------------------------------------------------------
+
+export function EmailDataGetLastUid(): number {
+  const dir = path.dirname(dataFilePath);
+  const filePath = path.join(dir, "last-uid.txt");
+  try {
+    if (fse.existsSync(filePath)) {
+      return parseInt(fse.readFileSync(filePath, "utf8").trim(), 10);
+    }
+  } catch (err) {
+    logger.error(`Failed to read last UID from ${filePath}`, err as Error);
+  }
+  return 0;
+}
+
+export function EmailDataSetLastUid(uid: number): void {
+  const dir = path.dirname(dataFilePath);
+  const filePath = path.join(dir, "last-uid.txt");
+  try {
+    fse.ensureDirSync(dir);
+    fse.writeFileSync(filePath, String(uid));
+  } catch (err) {
+    logger.error(`Failed to save last UID to ${filePath}`, err as Error);
+  }
+}
+
+// Read existing message-IDs once so callers can deduplicate without
+// hitting the disk for every individual email.
+export function EmailItemsGetExistingIds(): Set<string> {
+  const store = readStore();
+  return new Set(store.keys());
+}
