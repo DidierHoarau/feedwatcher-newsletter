@@ -1,6 +1,6 @@
 {
   "name": "feedwatcher-newsletter",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Newsletter to RSS feed via IMAP",
   "main": "ecosystem.config.js",
   "scripts": {
