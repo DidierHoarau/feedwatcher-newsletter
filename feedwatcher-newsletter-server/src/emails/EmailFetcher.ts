@@ -108,7 +108,6 @@ export async function EmailFetcherFetchEmails(
 
           fetch.on("message", (_msg, seqno) => {
             const streamPromise = new Promise<void>((msgResolve) => {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
               let rawEmail = "";
               _msg.on("body", (stream) => {
                 stream.on("data", (chunk) => {

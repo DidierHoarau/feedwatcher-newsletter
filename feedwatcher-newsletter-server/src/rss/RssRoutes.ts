@@ -10,7 +10,6 @@ export class RssRoutes {
   public getRoutes = async (fastify: FastifyInstance) => {
     // List all available RSS feeds (one per sender)
     fastify.get("/", async (request, reply) => {
-      const span = OTelRequestSpan(request);
       const senders = EmailSendersListAll();
       const baseUrl = `${request.protocol}://${request.hostname}`;
       const feeds = senders.map((s) => ({
