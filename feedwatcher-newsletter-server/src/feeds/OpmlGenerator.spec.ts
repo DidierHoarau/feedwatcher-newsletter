@@ -1,17 +1,5 @@
 import { OpmlGeneratorBuild } from "./OpmlGenerator";
 
-function makeFeed(overrides: Partial<FeedSummary> = {}): FeedSummary {
-  return {
-    feedId: "thedailynewsletter",
-    title: "The Daily Newsletter",
-    senderName: "The Daily Newsletter",
-    senderEmail: "news@example.com",
-    itemCount: 5,
-    latestDate: "2026-10-15T08:00:00.000Z",
-    ...overrides,
-  };
-}
-
 function makeEntry(overrides: Partial<{ title: string; feedUrl: string }> = {}): {
   title: string;
   feedUrl: string;

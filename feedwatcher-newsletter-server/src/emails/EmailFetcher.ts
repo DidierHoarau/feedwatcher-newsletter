@@ -4,6 +4,7 @@ import { Span } from "@opentelemetry/sdk-trace-base";
 import { v4 as uuidv4 } from "uuid";
 import { Config } from "../Config";
 import { OTelLogger, OTelTracer } from "../OTelContext";
+import { TimeoutWait } from "../utils-std-ts/Timeout";
 import { FeedIdentityGetFeedId, FeedIdentityIsSenderIgnored } from "../feeds/FeedIdentity";
 import { HtmlSanitizerTextToHtml } from "./HtmlSanitizer";
 import {
@@ -14,6 +15,14 @@ import {
 } from "./EmailsData";
 
 const logger = OTelLogger().createModuleLogger("EmailFetcher");
+
+// Emails are fetched, parsed and persisted in small slices so memory stays
+// bounded even when a whole backlog (potentially thousands of emails) is
+// re-ingested after a restart.
+const FETCH_SLICE_SIZE = 50;
+const PARSE_CONCURRENCY = 5;
+const SLICE_PAUSE_MS = 250;
+const BATCH_PAUSE_MS = 2000;
 
 export interface EmailItem {
   id: string;
@@ -102,7 +111,9 @@ export async function EmailFetcherFetchEmails(
 
           // Catch-up: process successive batches within the same run so a
           // backlog larger than the batch size drains instead of progressing
-          // one batch per run. Bounded by the per-run budget.
+          // one batch per run. Bounded by the per-run budget. A short pause
+          // between batches lets GC and the event loop (liveness probes)
+          // breathe instead of hammering through a whole backlog.
           let processed = 0;
           let offset = 0;
           try {
@@ -113,7 +124,6 @@ export async function EmailFetcherFetchEmails(
                 imap,
                 batchUids,
                 existingIds,
-                config,
                 span,
               );
               processed += batchUids.length;
@@ -123,6 +133,9 @@ export async function EmailFetcherFetchEmails(
                   `Saved ${saved} new email(s) (${processed}/${newUids.length} processed this run)`,
                   span,
                 );
+              }
+              if (offset < newUids.length && processed < runBudget) {
+                await TimeoutWait(BATCH_PAUSE_MS);
               }
             }
           } catch (loopError) {
@@ -154,18 +167,48 @@ export async function EmailFetcherFetchEmails(
   });
 }
 
-// Fetch, parse and persist one batch of UIDs. The last-uid marker advances
-// after each successful batch so an interrupted run resumes where it stopped.
+// Fetch, parse and persist one batch of UIDs, in bounded slices: memory stays
+// proportional to a slice (50 emails), never to the whole batch or backlog.
+// The last-uid marker advances after each slice so an interrupted run resumes
+// where it stopped.
 async function processBatch(
   imap: Imap,
   batchUids: number[],
   existingIds: Set<string>,
-  config: Config,
   span: Span,
 ): Promise<number> {
-  return new Promise<number>((batchResolve, batchReject) => {
+  let savedTotal = 0;
+  for (let offset = 0; offset < batchUids.length; offset += FETCH_SLICE_SIZE) {
+    const sliceUids = batchUids.slice(offset, offset + FETCH_SLICE_SIZE);
+    const rawEmails = await fetchSlice(imap, sliceUids, span);
+    const saved = await parseAndSaveSlice(rawEmails, existingIds, span);
+    savedTotal += saved;
+
+    // Persist the highest UID of this slice so the next fetch (or the next
+    // run) only retrieves messages beyond this point.
+    const maxUid = Math.max(...sliceUids);
+    EmailDataSetLastUid(maxUid);
+    logger.info(
+      `Slice of ${sliceUids.length} email(s) processed, next fetch will skip UIDs <= ${maxUid}`,
+      span,
+    );
+
+    if (offset + FETCH_SLICE_SIZE < batchUids.length) {
+      await TimeoutWait(SLICE_PAUSE_MS);
+    }
+  }
+  return savedTotal;
+}
+
+// Fetch the raw sources of one slice of UIDs.
+function fetchSlice(
+  imap: Imap,
+  sliceUids: number[],
+  span: Span,
+): Promise<string[]> {
+  return new Promise<string[]>((sliceResolve, sliceReject) => {
     const rawEmails: string[] = [];
-    const fetch = imap.fetch(batchUids, { bodies: "" });
+    const fetch = imap.fetch(sliceUids, { bodies: "" });
     const streamPromises: Promise<void>[] = [];
 
     fetch.on("message", (_msg, seqno) => {
@@ -186,106 +229,100 @@ async function processBatch(
 
     fetch.once("error", (fetchErr) => {
       logger.error(`Fetch error`, fetchErr, span);
-      batchReject(fetchErr);
+      sliceReject(fetchErr);
     });
 
     fetch.once("end", async () => {
       try {
-        // Wait for all stream reads to complete
         await Promise.all(streamPromises);
-
-        // Parse and process with controlled concurrency.
-        // Workers share an index so they compete for the next raw
-        // email — up to CONCURRENCY run in parallel.
-        const CONCURRENCY = 5;
-        const newItems: EmailItem[] = [];
-        const newSenderIds = new Set<string>();
-        let emailIndex = 0;
-
-        const processNextEmail = async (): Promise<void> => {
-          while (emailIndex < rawEmails.length) {
-            const rawEmail = rawEmails[emailIndex++];
-            if (!rawEmail) continue;
-
-            try {
-              const parsed = await simpleParser(rawEmail);
-              const messageId = parsed.messageId || `no-id-${Date.now()}`;
-
-              if (existingIds.has(messageId)) continue;
-
-              // Emails without a From header never become feeds (no
-              // "Unknown" pseudo-feed).
-              if (!parsed.from || parsed.from.value.length === 0) continue;
-              const from = parsed.from.value[0];
-              const senderEmail = from.address || "";
-              if (!senderEmail) continue;
-              const senderName = from.name || senderEmail;
-
-              // Ignored senders (non-newsletter inbox traffic) are skipped.
-              if (FeedIdentityIsSenderIgnored(senderName, senderEmail)) continue;
-
-              // Bodies are normalized to HTML: sanitize-html handles the HTML
-              // bodies, plain-text bodies are escaped into paragraphs.
-              const body =
-                parsed.html || HtmlSanitizerTextToHtml(parsed.text || "");
-
-              const emailItem: EmailItem = {
-                id: uuidv4(),
-                messageId,
-                senderName,
-                senderEmail,
-                subject: parsed.subject || "(no subject)",
-                body,
-                dateReceived: parsed.date
-                  ? parsed.date.toISOString()
-                  : new Date().toISOString(),
-                dateCreated: new Date().toISOString(),
-              };
-
-              const senderId = FeedIdentityGetFeedId(senderName, senderEmail);
-              const isNewSender = !newSenderIds.has(senderId);
-              newSenderIds.add(senderId);
-              newItems.push(emailItem);
-              existingIds.add(messageId);
-
-              if (isNewSender) {
-                logger.info(
-                  `New email from ${senderName} <${senderEmail}> [id: ${senderId}]: ${emailItem.subject}`,
-                  span,
-                );
-              }
-            } catch (parseError) {
-              logger.error(
-                `Error parsing email`,
-                parseError as Error,
-                span,
-              );
-            }
-          }
-        };
-
-        const workerCount = Math.min(CONCURRENCY, rawEmails.length);
-        const workers = Array.from({ length: workerCount }, () =>
-          processNextEmail(),
-        );
-        await Promise.all(workers);
-
-        // Persist all new emails in a single write
-        EmailItemsBatchSave(newItems);
-
-        // Persist the highest UID of this batch so the next fetch (or the
-        // next run) only retrieves messages beyond this point.
-        const maxUid = Math.max(...batchUids);
-        EmailDataSetLastUid(maxUid);
-        logger.info(
-          `Batch of ${batchUids.length} processed, next fetch will skip UIDs <= ${maxUid}`,
-          span,
-        );
-
-        batchResolve(newItems.length);
+        sliceResolve(rawEmails);
       } catch (endError) {
-        batchReject(endError as Error);
+        sliceReject(endError as Error);
       }
     });
   });
+}
+
+// Parse the raw emails of one slice and persist the new ones in a single
+// write. Workers share an index so they compete for the next raw email — up
+// to PARSE_CONCURRENCY run in parallel.
+async function parseAndSaveSlice(
+  rawEmails: string[],
+  existingIds: Set<string>,
+  span: Span,
+): Promise<number> {
+  const newItems: EmailItem[] = [];
+  const newSenderIds = new Set<string>();
+  let emailIndex = 0;
+
+  const processNextEmail = async (): Promise<void> => {
+    while (emailIndex < rawEmails.length) {
+      const rawEmail = rawEmails[emailIndex++];
+      if (!rawEmail) continue;
+
+      try {
+        const parsed = await simpleParser(rawEmail);
+        const messageId = parsed.messageId || `no-id-${Date.now()}`;
+
+        if (existingIds.has(messageId)) continue;
+
+        // Emails without a From header never become feeds (no
+        // "Unknown" pseudo-feed).
+        if (!parsed.from || parsed.from.value.length === 0) continue;
+        const from = parsed.from.value[0];
+        const senderEmail = from.address || "";
+        if (!senderEmail) continue;
+        const senderName = from.name || senderEmail;
+
+        // Ignored senders (non-newsletter inbox traffic) are skipped.
+        if (FeedIdentityIsSenderIgnored(senderName, senderEmail)) continue;
+
+        // Bodies are normalized to HTML: sanitize-html handles the HTML
+        // bodies, plain-text bodies are escaped into paragraphs.
+        const body =
+          parsed.html || HtmlSanitizerTextToHtml(parsed.text || "");
+
+        const emailItem: EmailItem = {
+          id: uuidv4(),
+          messageId,
+          senderName,
+          senderEmail,
+          subject: parsed.subject || "(no subject)",
+          body,
+          dateReceived: parsed.date
+            ? parsed.date.toISOString()
+            : new Date().toISOString(),
+          dateCreated: new Date().toISOString(),
+        };
+
+        const senderId = FeedIdentityGetFeedId(senderName, senderEmail);
+        const isNewSender = !newSenderIds.has(senderId);
+        newSenderIds.add(senderId);
+        newItems.push(emailItem);
+        existingIds.add(messageId);
+
+        if (isNewSender) {
+          logger.info(
+            `New email from ${senderName} <${senderEmail}> [id: ${senderId}]: ${emailItem.subject}`,
+            span,
+          );
+        }
+      } catch (parseError) {
+        logger.error(
+          `Error parsing email`,
+          parseError as Error,
+          span,
+        );
+      }
+    }
+  };
+
+  const workerCount = Math.min(PARSE_CONCURRENCY, rawEmails.length);
+  const workers = Array.from({ length: workerCount }, () =>
+    processNextEmail(),
+  );
+  await Promise.all(workers);
+
+  EmailItemsBatchSave(newItems);
+  return newItems.length;
 }
