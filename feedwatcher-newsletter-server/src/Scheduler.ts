@@ -10,7 +10,11 @@ import {
   EmailsDataPurgeExpired,
   EmailSendersListAll,
 } from "./emails/EmailsData";
-import { FeedIdentityGetFeedId, FeedIdentityInit } from "./feeds/FeedIdentity";
+import {
+  FeedIdentityGetFeedId,
+  FeedIdentityGetFeedUrlId,
+  FeedIdentityInit,
+} from "./feeds/FeedIdentity";
 
 const logger = OTelLogger().createModuleLogger("Scheduler");
 
@@ -22,8 +26,10 @@ function logAvailableFeeds(span: Span): void {
   }
   for (const s of senders) {
     const id = FeedIdentityGetFeedId(s.senderName, s.senderEmail);
+    const urlId = FeedIdentityGetFeedUrlId(id);
+    const url = config.PUBLIC_URL ? `${config.PUBLIC_URL}/rss/${urlId}` : `/rss/${urlId}`;
     logger.info(
-      `RSS Feed: [${id}] ${s.senderName} <${s.senderEmail}> ${config.PUBLIC_URL}/rss/${id}`,
+      `RSS Feed: [${id}] ${s.senderName} <${s.senderEmail}> ${url}`,
       span,
     );
   }
