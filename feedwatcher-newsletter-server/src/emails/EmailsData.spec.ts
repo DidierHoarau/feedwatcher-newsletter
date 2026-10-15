@@ -1,7 +1,14 @@
 import * as fs from "fs";
 import * as os from "os";
 import path from "path";
-import { EmailsDataInit, EmailFeedsListAll, EmailItemGetById, EmailItemsBatchSave } from "./EmailsData";
+import {
+  EmailsDataInit,
+  EmailFeedsListAll,
+  EmailItemGetById,
+  EmailItemsBatchSave,
+  EmailItemsGetExistingIds,
+  EmailsDataPurgeExpired,
+} from "./EmailsData";
 import { EmailItem } from "./EmailFetcher";
 import { FeedIdentityInit } from "../feeds/FeedIdentity";
 
@@ -108,5 +115,50 @@ describe("EmailItemGetById", () => {
     EmailItemsBatchSave([makeItem()]);
     expect(EmailItemGetById("aaaaaaaa-1111-4111-8111-111111111111")).toBeDefined();
     expect(EmailItemGetById("bbbbbbbb-1111-4111-8111-111111111111")).toBeUndefined();
+  });
+});
+
+describe("journal store", () => {
+  it("appends saves to emails.jsonl and deduplicates by messageId (last wins)", () => {
+    EmailItemsBatchSave([makeItem()]);
+    EmailItemsBatchSave([
+      makeItem({ id: "cccccccc-1111-4111-8111-111111111111", subject: "Updated" }),
+    ]);
+    const journalPath = path.join(dataDir, "emails.jsonl");
+    const lines = fs
+      .readFileSync(journalPath, "utf8")
+      .split("\n")
+      .filter((l) => l.trim());
+    expect(lines).toHaveLength(2);
+    expect(EmailItemsGetExistingIds().size).toBe(1);
+    expect(EmailItemGetById("cccccccc-1111-4111-8111-111111111111")).toBeDefined();
+    expect(EmailItemGetById("aaaaaaaa-1111-4111-8111-111111111111")).toBeUndefined();
+  });
+
+  it("migrates a legacy emails.json array into the journal", () => {
+    const legacy = [makeItem({ messageId: "<legacy@example.com>" })];
+    fs.writeFileSync(
+      path.join(dataDir, "emails.json"),
+      JSON.stringify(legacy),
+    );
+    EmailsDataInit(7, dataDir);
+    expect(EmailItemGetById("aaaaaaaa-1111-4111-8111-111111111111")).toBeDefined();
+    expect(fs.existsSync(path.join(dataDir, "emails.json"))).toBe(false);
+    expect(fs.existsSync(path.join(dataDir, "emails.json.migrated"))).toBe(true);
+  });
+
+  it("purges expired items and compacts the journal to one line per message", () => {
+    EmailItemsBatchSave([
+      makeItem({ messageId: "<old@example.com>", dateReceived: "2020-01-01T00:00:00.000Z" }),
+      makeItem({ messageId: "<new@example.com>" }),
+    ]);
+    EmailsDataPurgeExpired();
+    const journalPath = path.join(dataDir, "emails.jsonl");
+    const lines = fs
+      .readFileSync(journalPath, "utf8")
+      .split("\n")
+      .filter((l) => l.trim());
+    expect(lines).toHaveLength(1);
+    expect(EmailItemsGetExistingIds()).toEqual(new Set(["<new@example.com>"]));
   });
 });

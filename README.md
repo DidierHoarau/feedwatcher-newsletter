@@ -4,7 +4,7 @@ FeedWatcher Newsletter is a server-only service that connects to an IMAP mailbox
 
 # Philosophy
 
-This project is a server-only companion to FeedWatcher. It has no UI and requires no external database. Emails are stored on disk as a JSON file and automatically purged after a configurable retention period. The goal is a lightweight, self-contained service that converts an email inbox into subscribable RSS feeds.
+This project is a server-only companion to FeedWatcher. It has no UI and requires no external database. Emails are stored on disk as an append-only JSON-lines journal (`emails.jsonl`, migrated automatically from the legacy `emails.json` array) and automatically purged after a configurable retention period. The goal is a lightweight, self-contained service that converts an email inbox into subscribable RSS feeds.
 
 One RSS feed is generated per unique sender name. Each feed's items are the email bodies (HTML preferred, plain text fallback) from that sender, ordered by date received.
 
