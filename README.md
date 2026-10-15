@@ -4,9 +4,11 @@ FeedWatcher Newsletter is a server-only service that connects to an IMAP mailbox
 
 # Philosophy
 
-This project is a server-only companion to FeedWatcher. It has no UI and requires no external database. Emails are stored on disk as a JSON file and automatically purged after a configurable retention period. The goal is a lightweight, self-contained service that converts an email inbox into subscribable RSS feeds.
+This project is a server-only companion to FeedWatcher. It has no UI and requires no external database. Emails are stored on disk as an append-only JSON-lines journal (`emails.jsonl`, migrated automatically from the legacy `emails.json` array) and automatically purged after a configurable retention period. The goal is a lightweight, self-contained service that converts an email inbox into subscribable RSS feeds.
 
 One RSS feed is generated per unique sender name. Each feed's items are the email bodies (HTML preferred, plain text fallback) from that sender, ordered by date received.
+
+Email bodies are sanitized when served (scripts, event handlers, dangerous URLs and 1x1 tracking pixels are stripped), each item links to a readable web view of the email, and feeds advertise near-real-time ingestion via IMAP IDLE with the cron schedule as fallback. Feed URLs can be made unguessable with a per-feed token, senders can be ignored or renamed via configuration, and all feeds can be imported anywhere through OPML export.
 
 # Deployment
 
@@ -112,12 +114,41 @@ Configuration values can be set via environment variables or through the `config
 
 ## General
 
-| Variable               | Description                                        | Default                 |
-| ---------------------- | -------------------------------------------------- | ----------------------- |
-| `PUBLIC_URL`           | Public base URL of the service (used in feed URLs) | `http://localhost:8080` |
-| `EMAIL_FETCH_CRON`     | Cron expression for the email fetch schedule       | `0 * * * *` (hourly)    |
-| `EMAIL_RETENTION_DAYS` | Number of days to retain emails before purging     | `7`                     |
-| `DATA_DIR`             | Directory for persisting email data                | `/data`                 |
+| Variable                   | Description                                                                   | Default                 |
+| -------------------------- | ----------------------------------------------------------------------------- | ----------------------- |
+| `PUBLIC_URL`               | Public base URL of the service (used in feed URLs; empty = from the request)  | `` (empty)              |
+| `EMAIL_FETCH_CRON`         | Cron expression for the email fetch schedule (fallback for IMAP IDLE)         | `0 * * * *` (hourly)    |
+| `EMAIL_RETENTION_DAYS`     | Number of days to retain emails before purging                                | `7`                     |
+| `DATA_DIR`                 | Directory for persisting email data                                           | `/data`                 |
+
+## Fetching and freshness
+
+| Variable                     | Description                                                                        | Default |
+| ---------------------------- | ---------------------------------------------------------------------------------- | ------- |
+| `EMAIL_FETCH_BATCH_SIZE`     | Max emails per IMAP fetch batch                                                    | `200`   |
+| `EMAIL_FETCH_RUN_BUDGET`     | Max emails processed within a single run, across successive batches (catch-up)     | `2000`  |
+| `EMAIL_FETCH_IDLE`           | Keep a long-lived IMAP connection for near-real-time ingestion (IMAP IDLE)         | `true`  |
+| `EMAIL_FETCH_RETRIES`        | Retry attempts for transient IMAP failures within one cycle                        | `2`     |
+| `EMAIL_FETCH_RETRY_DELAY_MS` | Delay between retry attempts in milliseconds                                       | `10000` |
+
+## Content and feeds
+
+| Variable                      | Description                                                                        | Default |
+| ----------------------------- | ---------------------------------------------------------------------------------- | ------- |
+| `EMAIL_STRIP_TRACKING_PIXELS` | Strip 1x1 tracking-pixel images from email bodies                                  | `true`  |
+| `FEED_PRIVATE_URLS`           | Advertise unguessable feed URLs (`<feedId>.<token>`); bare feed ids keep working   | `true`  |
+| `SENDER_IGNORE_LIST`          | Comma-separated sender name/email fragments whose emails never become feeds        | `` (empty)              |
+| `FEED_OVERRIDES`              | JSON object mapping a sender email or name to a stable feed id and/or title        | `{}`    |
+
+`FEED_OVERRIDES` example (stabilizes identity when a newsletter renames itself, merges senders into one feed, or renames a feed):
+
+```json
+{
+  "FEED_OVERRIDES": {
+    "alerts@scmp.com": { "feedId": "scmp", "title": "South China Morning Post" }
+  }
+}
+```
 
 ## OpenTelemetry
 
@@ -133,14 +164,18 @@ Configuration values can be set via environment variables or through the `config
 
 # API
 
-| Method | Path       | Description                                         |
-| ------ | ---------- | --------------------------------------------------- |
-| `GET`  | `/rss/`    | List all available RSS feeds (one per sender)       |
-| `GET`  | `/rss/:id` | Get the RSS feed for a specific sender by sender ID |
+| Method | Path              | Description                                              |
+| ------ | ----------------- | -------------------------------------------------------- |
+| `GET`  | `/rss/`           | List all available RSS feeds — HTML index page for browsers, JSON array for API clients |
+| `GET`  | `/rss/opml`       | OPML 2.0 export of all feeds (importable into FeedWatcher and most RSS readers) |
+| `GET`  | `/rss/:id`        | Get the RSS feed for a specific sender by sender ID      |
+| `GET`  | `/view/:emailId`  | Readable web view of one email (the feed items' permalink target) |
 
-The sender ID is derived from the sender name by lowercasing it and removing all non-alphanumeric characters (e.g., `"The Daily Newsletter"` → `thedailynewsletter`).
+The sender ID is derived from the sender name by lowercasing it and removing all non-alphanumeric characters (e.g., `"The Daily Newsletter"` → `thedailynewsletter`). It can be overridden per sender with `FEED_OVERRIDES`.
 
-The `/rss/` list response returns a JSON array with the following fields per sender:
+When `FEED_PRIVATE_URLS` is enabled (default), the list and the OPML export advertise feed URLs of the form `<feedId>.<randomToken>` (e.g. `thedailynewsletter.9f86d081884c7d65`), persisted in `DATA_DIR/feed-tokens.json`. Bare feed ids keep working so existing reader subscriptions are unaffected.
+
+The JSON list response returns the following fields per sender:
 
 ```json
 [
@@ -148,7 +183,7 @@ The `/rss/` list response returns a JSON array with the following fields per sen
     "id": "thedailynewsletter",
     "senderName": "The Daily Newsletter",
     "senderEmail": "news@example.com",
-    "feedUrl": "http://localhost:8080/rss/thedailynewsletter"
+    "feedUrl": "https://feedwatcher-newsletter.example.com/rss/thedailynewsletter.9f86d081884c7d65"
   }
 ]
 ```

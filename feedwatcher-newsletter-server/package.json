@@ -1,13 +1,13 @@
 {
   "name": "feedwatcher-newsletter-server",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "",
   "license": "MIT",
   "scripts": {
     "//": "-------------------------------------------------------------------",
     "build": "tsc",
     "lint": "oxlint src",
-    "test": "jest --coverage || true",
+    "test": "jest --coverage",
     "////": "-----------------------------------------------------------------",
     "dev": "tsx watch ./src/App.ts",
     "dev:test": "NODE_ENV=dev jest --watch --config='jest.config.js'"

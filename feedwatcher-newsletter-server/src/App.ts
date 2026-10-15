@@ -11,6 +11,8 @@ import {
 } from "./OTelContext";
 import { SchedulerInit } from "./Scheduler";
 import { RssRoutes } from "./rss/RssRoutes";
+import { ViewRoutes } from "./rss/ViewRoutes";
+import { FeedIdentityInit } from "./feeds/FeedIdentity";
 
 const logger = OTelLogger().createModuleLogger("app");
 
@@ -22,7 +24,14 @@ Promise.resolve().then(async () => {
   await config.reload((msg) => logger.info(msg));
   watchFile(config.CONFIG_FILE, () => {
     logger.info(`Config updated: ${config.CONFIG_FILE}`);
-    config.reload((msg) => logger.info(msg));
+    config.reload((msg) => logger.info(msg)).then(() => {
+      FeedIdentityInit({
+        ignoreList: config.SENDER_IGNORE_LIST,
+        overrides: config.FEED_OVERRIDES,
+        privateUrls: config.FEED_PRIVATE_URLS,
+        dataDir: config.DATA_DIR,
+      });
+    });
   });
 
   OTelSetTracer(new StandardTracer(config));
@@ -47,7 +56,15 @@ Promise.resolve().then(async () => {
     return { started: true };
   });
 
-  fastify.register(new RssRoutes().getRoutes, {
+  // Human entry point: the feeds index page
+  fastify.get("/", async (_request, reply) => {
+    return reply.redirect("/rss/");
+  });
+
+  // Readable permalink pages for individual emails
+  fastify.register(new ViewRoutes().getRoutes);
+
+  fastify.register(new RssRoutes(config).getRoutes, {
     prefix: "/rss",
   });
 
