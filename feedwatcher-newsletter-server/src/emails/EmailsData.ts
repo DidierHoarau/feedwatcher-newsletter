@@ -1,9 +1,23 @@
 import * as fse from "fs-extra";
 import path from "path";
 import { OTelLogger } from "../OTelContext";
+import {
+  FeedIdentityGetFeedId,
+  FeedIdentityGetTitle,
+  FeedIdentityIsSenderIgnored,
+} from "../feeds/FeedIdentity";
 import { EmailItem } from "./EmailFetcher";
 
 const logger = OTelLogger().createModuleLogger("EmailsData");
+
+export interface FeedSummary {
+  feedId: string;
+  title: string;
+  senderName: string;
+  senderEmail: string;
+  itemCount: number;
+  latestDate: string;
+}
 
 let retentionDays = 3;
 let dataFilePath = "";
@@ -65,9 +79,53 @@ export function EmailSenderGetId(senderName: string): string {
     .slice(0, 64);
 }
 
+// Sender-name-only grouping breaks down for senders without a From header;
+// such emails are never listed as feeds.
+function isUnknownSender(item: EmailItem): boolean {
+  return (
+    item.senderName === "Unknown" ||
+    item.senderEmail === "unknown@unknown.com" ||
+    !item.senderEmail
+  );
+}
+
+// One summary per feed, grouped by the override-aware feed id, in a single
+// pass over the store.
+export function EmailFeedsListAll(): FeedSummary[] {
+  const feeds = new Map<string, FeedSummary>();
+  for (const item of readStore().values()) {
+    if (isUnknownSender(item)) continue;
+    if (FeedIdentityIsSenderIgnored(item.senderName, item.senderEmail)) continue;
+    const feedId = FeedIdentityGetFeedId(item.senderName, item.senderEmail);
+    const existing = feeds.get(feedId);
+    if (existing) {
+      existing.itemCount++;
+      if (new Date(item.dateReceived).getTime() > new Date(existing.latestDate).getTime()) {
+        existing.latestDate = item.dateReceived;
+      }
+      continue;
+    }
+    feeds.set(feedId, {
+      feedId,
+      title: FeedIdentityGetTitle(item.senderName, item.senderEmail),
+      senderName: item.senderName,
+      senderEmail: item.senderEmail,
+      itemCount: 1,
+      latestDate: item.dateReceived,
+    });
+  }
+  return Array.from(feeds.values()).sort((a, b) =>
+    a.title.localeCompare(b.title),
+  );
+}
+
 export function EmailItemsListById(id: string): EmailItem[] {
   return Array.from(readStore().values())
-    .filter((e) => EmailSenderGetId(e.senderName) === id)
+    .filter(
+      (e) =>
+        !isUnknownSender(e) &&
+        FeedIdentityGetFeedId(e.senderName, e.senderEmail) === id,
+    )
     .sort(
       (a, b) =>
         new Date(b.dateReceived).getTime() - new Date(a.dateReceived).getTime(),
@@ -103,6 +161,16 @@ export function EmailItemsListAll(): EmailItem[] {
     (a, b) =>
       new Date(b.dateReceived).getTime() - new Date(a.dateReceived).getTime(),
   );
+}
+
+// Look up one email by its item id (uuid) for the /view/:emailId pages.
+export function EmailItemGetById(id: string): EmailItem | undefined {
+  for (const item of readStore().values()) {
+    if (item.id === id) {
+      return item;
+    }
+  }
+  return undefined;
 }
 
 export function EmailsDataPurgeExpired(): void {

@@ -3,12 +3,14 @@ import * as schedule from "node-schedule";
 import { Config } from "./Config";
 import { OTelLogger, OTelTracer } from "./OTelContext";
 import { EmailFetcherFetchEmails } from "./emails/EmailFetcher";
+import { IdleWatcherStart } from "./emails/IdleWatcher";
+import { TimeoutWait } from "./utils-std-ts/Timeout";
 import {
   EmailsDataInit,
   EmailsDataPurgeExpired,
   EmailSendersListAll,
-  EmailSenderGetId,
 } from "./emails/EmailsData";
+import { FeedIdentityGetFeedId, FeedIdentityInit } from "./feeds/FeedIdentity";
 
 const logger = OTelLogger().createModuleLogger("Scheduler");
 
@@ -19,11 +21,41 @@ function logAvailableFeeds(span: Span): void {
     return;
   }
   for (const s of senders) {
-    const id = EmailSenderGetId(s.senderName);
+    const id = FeedIdentityGetFeedId(s.senderName, s.senderEmail);
     logger.info(
       `RSS Feed: [${id}] ${s.senderName} <${s.senderEmail}> ${config.PUBLIC_URL}/rss/${id}`,
       span,
     );
+  }
+}
+
+// Fetch with short retries inside the same cycle so a transient IMAP failure
+// does not cost a full schedule interval.
+async function fetchEmailsWithRetry(
+  context: Span,
+  configIn: Config,
+): Promise<void> {
+  const attempts = 1 + Math.max(0, configIn.EMAIL_FETCH_RETRIES);
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      await EmailFetcherFetchEmails(context, configIn);
+      return;
+    } catch (err) {
+      logger.error(
+        `Email fetch attempt ${attempt}/${attempts} failed`,
+        err as Error,
+        context,
+      );
+      if (attempt < attempts) {
+        logger.info(
+          `Retrying email fetch in ${configIn.EMAIL_FETCH_RETRY_DELAY_MS}ms`,
+          context,
+        );
+        await TimeoutWait(configIn.EMAIL_FETCH_RETRY_DELAY_MS);
+      } else {
+        throw err;
+      }
+    }
   }
 }
 
@@ -34,14 +66,32 @@ export async function SchedulerInit(context: Span, configIn: Config) {
   config = configIn;
 
   EmailsDataInit(Number(config.EMAIL_RETENTION_DAYS), config.DATA_DIR);
+  FeedIdentityInit({
+    ignoreList: config.SENDER_IGNORE_LIST,
+    overrides: config.FEED_OVERRIDES,
+    privateUrls: config.FEED_PRIVATE_URLS,
+    dataDir: config.DATA_DIR,
+  });
 
   logger.info(
     `Scheduling email fetch with cron: ${config.EMAIL_FETCH_CRON}`,
     span,
   );
 
+  // Near-real-time ingestion via IMAP IDLE (the cron schedule stays as
+  // fallback and also performs the retention purge)
+  IdleWatcherStart(config, () => {
+    const idleSpan = OTelTracer().startSpan("IdleEmailFetch");
+    fetchEmailsWithRetry(idleSpan, config)
+      .then(() => idleSpan.end())
+      .catch((err) => {
+        logger.error(`Error fetching emails on IDLE trigger`, err, idleSpan);
+        idleSpan.end();
+      });
+  });
+
   // Run immediately on startup
-  EmailFetcherFetchEmails(span, config)
+  fetchEmailsWithRetry(span, config)
     .then(() => logAvailableFeeds(span))
     .catch((err) => {
       logger.error(`Error fetching emails on startup`, err, span);
@@ -51,7 +101,7 @@ export async function SchedulerInit(context: Span, configIn: Config) {
   schedule.scheduleJob(config.EMAIL_FETCH_CRON, () => {
     const jobSpan = OTelTracer().startSpan("ScheduledEmailFetch");
     EmailsDataPurgeExpired();
-    EmailFetcherFetchEmails(jobSpan, config)
+    fetchEmailsWithRetry(jobSpan, config)
       .then(() => {
         logAvailableFeeds(jobSpan);
         jobSpan.end();

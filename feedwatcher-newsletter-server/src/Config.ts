@@ -1,4 +1,5 @@
 import { ConfigBase } from "@devopsplaybook.io/common-utils";
+import { FeedOverride } from "./feeds/FeedIdentity";
 
 export class Config extends ConfigBase {
   // IMAP settings
@@ -18,8 +19,37 @@ export class Config extends ConfigBase {
   // Batch: max emails to process per fetch (prevents unbounded run time)
   public EMAIL_FETCH_BATCH_SIZE = 200;
 
-  // Public URL of the service
-  public PUBLIC_URL = "http://localhost:8080";
+  // Catch-up: max emails to process within a single run, across successive
+  // batches, so a backlog larger than the batch size drains instead of
+  // progressing one batch per run
+  public EMAIL_FETCH_RUN_BUDGET = 2000;
+
+  // Retry: attempts for transient IMAP failures within one cycle
+  public EMAIL_FETCH_RETRIES = 2;
+  public EMAIL_FETCH_RETRY_DELAY_MS = 10000;
+
+  // IDLE: keep a long-lived IMAP connection for near-real-time ingestion,
+  // with the cron schedule kept as fallback
+  public EMAIL_FETCH_IDLE = true;
+
+  // Content hygiene: strip 1x1 tracking-pixel images from email bodies
+  public EMAIL_STRIP_TRACKING_PIXELS = true;
+
+  // Privacy: advertise and emit unguessable feed URLs (<feedId>.<token>);
+  // bare feed ids keep working for existing subscriptions
+  public FEED_PRIVATE_URLS = true;
+
+  // Feed control: comma-separated sender name/email fragments whose emails
+  // are never ingested or listed as feeds
+  public SENDER_IGNORE_LIST = "";
+
+  // Feed control: map a sender email or name to a stable feed id and/or
+  // title, e.g. { "news@example.com": { "feedId": "daily", "title": "The Daily" } }
+  public FEED_OVERRIDES: Record<string, FeedOverride> = {};
+
+  // Public URL of the service; when empty, feed URLs are derived from the
+  // incoming request
+  public PUBLIC_URL = "";
 
   constructor() {
     super("feedwatcher-newsletter-server");
@@ -32,6 +62,14 @@ export class Config extends ConfigBase {
     this.addConfigField({ field: "EMAIL_FETCH_CRON" });
     this.addConfigField({ field: "EMAIL_RETENTION_DAYS" });
     this.addConfigField({ field: "EMAIL_FETCH_BATCH_SIZE" });
+    this.addConfigField({ field: "EMAIL_FETCH_RUN_BUDGET" });
+    this.addConfigField({ field: "EMAIL_FETCH_RETRIES" });
+    this.addConfigField({ field: "EMAIL_FETCH_RETRY_DELAY_MS" });
+    this.addConfigField({ field: "EMAIL_FETCH_IDLE" });
+    this.addConfigField({ field: "EMAIL_STRIP_TRACKING_PIXELS" });
+    this.addConfigField({ field: "FEED_PRIVATE_URLS" });
+    this.addConfigField({ field: "SENDER_IGNORE_LIST" });
+    this.addConfigField({ field: "FEED_OVERRIDES" });
     this.addConfigField({ field: "PUBLIC_URL" });
   }
 }
