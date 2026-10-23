@@ -1,5 +1,9 @@
 import { Config } from "../Config";
-import { IdleWatcherStart, IdleWatcherStop } from "./IdleWatcher";
+import {
+  IdleWatcherGetState,
+  IdleWatcherStart,
+  IdleWatcherStop,
+} from "./IdleWatcher";
 
 jest.mock("imapflow", () => {
   const { EventEmitter: Emitter } = jest.requireActual("events");
@@ -204,5 +208,57 @@ describe("IdleWatcher", () => {
     jest.advanceTimersByTime(30000);
     await flushMicrotasks();
     expect(FakeImapFlow.instances).toHaveLength(2);
+  });
+});
+
+describe("IdleWatcherGetState", () => {
+  it("reports disabled and disconnected before start", () => {
+    expect(IdleWatcherGetState()).toEqual({
+      enabled: false,
+      connected: false,
+    });
+  });
+
+  it("reports enabled and connected once the mailbox is open", async () => {
+    IdleWatcherStart(makeConfig(), jest.fn());
+    await flushMicrotasks();
+
+    expect(IdleWatcherGetState()).toEqual({
+      enabled: true,
+      connected: true,
+    });
+  });
+
+  it("stays enabled but disconnects while waiting to reconnect", async () => {
+    IdleWatcherStart(makeConfig(), jest.fn());
+    await flushMicrotasks();
+
+    FakeImapFlow.instances[0].emit("close");
+
+    expect(IdleWatcherGetState()).toEqual({
+      enabled: true,
+      connected: false,
+    });
+  });
+
+  it("reports disabled and disconnected after a stop", async () => {
+    IdleWatcherStart(makeConfig(), jest.fn());
+    await flushMicrotasks();
+
+    IdleWatcherStop();
+
+    expect(IdleWatcherGetState()).toEqual({
+      enabled: false,
+      connected: false,
+    });
+  });
+
+  it("reports disabled when EMAIL_FETCH_IDLE is false", () => {
+    IdleWatcherStart(makeConfig({ EMAIL_FETCH_IDLE: false }), jest.fn());
+
+    expect(IdleWatcherGetState()).toEqual({
+      enabled: false,
+      connected: false,
+    });
   });
 });

@@ -17,6 +17,7 @@ const RECONNECT_MAX_DELAY_MS = 600000;
 let config: Config;
 let triggerFetch: () => void;
 let running = false;
+let connected = false;
 let reconnectDelay = RECONNECT_BASE_DELAY_MS;
 let debounceTimer: NodeJS.Timeout | undefined;
 let reconnectTimer: NodeJS.Timeout | undefined;
@@ -51,6 +52,7 @@ export function IdleWatcherStart(
 
 export function IdleWatcherStop(): void {
   running = false;
+  connected = false;
   generation++;
   if (debounceTimer) {
     clearTimeout(debounceTimer);
@@ -69,6 +71,7 @@ export function IdleWatcherStop(): void {
 
 function connect(): void {
   if (!running) return;
+  connected = false;
   const connectionGeneration = ++generation;
   logger.info(
     `Opening IMAP IDLE connection to ${config.IMAP_HOST}:${config.IMAP_PORT}`,
@@ -96,6 +99,7 @@ function connect(): void {
   client.once("close", () => {
     if (connectionGeneration !== generation) return;
     logger.info(`IMAP IDLE connection closed`);
+    connected = false;
     connection = undefined;
     scheduleReconnect();
   });
@@ -113,6 +117,7 @@ function connect(): void {
         client.close();
         return;
       }
+      connected = true;
       ImapLogConnectionEstablished(config);
       logger.info("IMAP IDLE listening for new mail");
       client.on("exists", (data) => {
@@ -125,6 +130,7 @@ function connect(): void {
     } catch (err) {
       if (connectionGeneration !== generation) return;
       ImapLogConnectionError("IMAP IDLE connection error", err, config);
+      connected = false;
       // close() triggers the close handler above, which schedules the
       // reconnect with backoff.
       client.close();
@@ -156,4 +162,10 @@ function scheduleFetch(): void {
     debounceTimer = undefined;
     triggerFetch();
   }, FETCH_DEBOUNCE_MS);
+}
+
+// IDLE health for /api/status: enabled stays true while the watcher is
+// reconnecting (running, not connected), which is what a stall detector needs.
+export function IdleWatcherGetState(): { enabled: boolean; connected: boolean } {
+  return { enabled: config?.EMAIL_FETCH_IDLE === true && running, connected };
 }

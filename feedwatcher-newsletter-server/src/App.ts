@@ -10,15 +10,14 @@ import {
 } from "./OTelContext";
 import { SchedulerInit, SchedulerReload } from "./Scheduler";
 
-const logger = OTelLogger().createModuleLogger("app");
+export async function startServer(): Promise<void> {
+  const logger = OTelLogger().createModuleLogger("app");
 
-logger.info("====== Starting FeedWatcher Newsletter Server ======");
-logger.info(
-  `Process identity: uid=${typeof process.getuid === "function" ? process.getuid() : "n/a"} gid=${typeof process.getgid === "function" ? process.getgid() : "n/a"}`,
-);
+  logger.info("====== Starting FeedWatcher Newsletter Server ======");
+  logger.info(
+    `Process identity: uid=${typeof process.getuid === "function" ? process.getuid() : "n/a"} gid=${typeof process.getgid === "function" ? process.getgid() : "n/a"}`,
+  );
 
-Promise.resolve().then(async () => {
-  //
   const config = new Config();
   await config.reload((msg) => logger.info(msg));
 
@@ -28,9 +27,11 @@ Promise.resolve().then(async () => {
 
   const span = OTelTracer().startSpan("init");
 
-  await SchedulerInit(span, config);
-
-  span.end();
+  try {
+    await SchedulerInit(span, config);
+  } finally {
+    span.end();
+  }
 
   // Hot configuration reload. ConfigBase.reload falls back to the defaults
   // when config.json is unreadable, so guard with a pre-parse: a missing or
@@ -67,7 +68,12 @@ Promise.resolve().then(async () => {
     if (err) {
       logger.error("Error Starting API", err);
       process.exit(1);
+      return;
     }
     logger.info(`API Listening on port ${config.API_PORT}`);
   });
-});
+}
+
+if (require.main === module) {
+  void startServer();
+}

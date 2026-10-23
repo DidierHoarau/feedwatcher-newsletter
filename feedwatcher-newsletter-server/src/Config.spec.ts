@@ -43,4 +43,12 @@ describe("Config", () => {
     expect(config.IMAP_TLS_INSECURE).toBe(false);
     expect(config.IMAP_TLS_CA_FILE).toBe("");
   });
+
+  it("reports the server package version, not the shared library one", () => {
+    const serverPkg = JSON.parse(
+      fs.readFileSync(path.resolve(__dirname, "../package.json"), "utf8"),
+    );
+    expect(serverPkg.name).toBe("feedwatcher-newsletter-server");
+    expect(new Config().VERSION).toBe(serverPkg.version);
+  });
 });
