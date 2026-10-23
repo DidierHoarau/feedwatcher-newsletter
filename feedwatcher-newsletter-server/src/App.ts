@@ -1,7 +1,7 @@
 import { StandardMeter, StandardTracer } from "@devopsplaybook.io/otel-utils";
 import { StandardTracerFastifyRegisterHooks } from "@devopsplaybook.io/otel-utils-fastify";
 import Fastify from "fastify";
-import { watchFile } from "fs-extra";
+import * as fse from "fs-extra";
 import { Config } from "./Config";
 import {
   OTelLogger,
@@ -9,10 +9,9 @@ import {
   OTelSetTracer,
   OTelTracer,
 } from "./OTelContext";
-import { SchedulerInit } from "./Scheduler";
+import { SchedulerInit, SchedulerReload } from "./Scheduler";
 import { RssRoutes } from "./rss/RssRoutes";
 import { ViewRoutes } from "./rss/ViewRoutes";
-import { FeedIdentityInit } from "./feeds/FeedIdentity";
 
 const logger = OTelLogger().createModuleLogger("app");
 
@@ -22,17 +21,6 @@ Promise.resolve().then(async () => {
   //
   const config = new Config();
   await config.reload((msg) => logger.info(msg));
-  watchFile(config.CONFIG_FILE, () => {
-    logger.info(`Config updated: ${config.CONFIG_FILE}`);
-    config.reload((msg) => logger.info(msg)).then(() => {
-      FeedIdentityInit({
-        ignoreList: config.SENDER_IGNORE_LIST,
-        overrides: config.FEED_OVERRIDES,
-        privateUrls: config.FEED_PRIVATE_URLS,
-        dataDir: config.DATA_DIR,
-      });
-    });
-  });
 
   OTelSetTracer(new StandardTracer(config));
   OTelSetMeter(new StandardMeter(config));
@@ -43,6 +31,33 @@ Promise.resolve().then(async () => {
   await SchedulerInit(span, config);
 
   span.end();
+
+  // Hot configuration reload. ConfigBase.reload falls back to the defaults
+  // when config.json is unreadable, so guard with a pre-parse: a missing or
+  // half-written file keeps the last valid in-memory configuration instead
+  // of resetting every file-based value. Registered after SchedulerInit so
+  // the scheduler state exists; re-entrancy guard against poll overlaps.
+  let reloading = false;
+  fse.watchFile(config.CONFIG_FILE, async () => {
+    if (reloading) return;
+    reloading = true;
+    try {
+      try {
+        await fse.readJson(config.CONFIG_FILE);
+      } catch {
+        logger.warn(
+          `Ignoring config reload: ${config.CONFIG_FILE} is missing or invalid; keeping the last valid configuration`,
+        );
+        return;
+      }
+      logger.info(`Config updated: ${config.CONFIG_FILE}`);
+      await config.reload((msg) => logger.info(msg));
+      SchedulerReload(config);
+      logger.info("Configuration reloaded and applied");
+    } finally {
+      reloading = false;
+    }
+  });
 
   // API
 

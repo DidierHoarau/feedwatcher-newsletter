@@ -111,6 +111,8 @@ Configuration values can be set via environment variables or through the `config
 | `IMAP_USER`     | IMAP account username              |         |
 | `IMAP_PASSWORD` | IMAP account password              |         |
 | `IMAP_MAILBOX`  | Mailbox folder to read emails from | `INBOX` |
+| `IMAP_SOCKET_TIMEOUT_MS` | Socket inactivity timeout for fetch connections in milliseconds (`0` disables) | `120000` |
+| `IMAP_IDLE_SOCKET_TIMEOUT_MS` | Socket inactivity timeout for the IDLE connection in milliseconds; must exceed the 300 s IDLE keepalive (`0` disables) | `600000` |
 
 ## General
 
@@ -118,7 +120,7 @@ Configuration values can be set via environment variables or through the `config
 | -------------------------- | ----------------------------------------------------------------------------- | ----------------------- |
 | `PUBLIC_URL`               | Public base URL of the service (used in feed URLs; empty = from the request)  | `` (empty)              |
 | `EMAIL_FETCH_CRON`         | Cron expression for the email fetch schedule (fallback for IMAP IDLE)         | `0 * * * *` (hourly)    |
-| `EMAIL_RETENTION_DAYS`     | Number of days to retain emails before purging                                | `7`                     |
+| `EMAIL_RETENTION_DAYS`     | Number of days to retain emails before purging                                | `3`                     |
 | `DATA_DIR`                 | Directory for persisting email data                                           | `/data`                 |
 
 ## Fetching and freshness
@@ -130,6 +132,7 @@ Configuration values can be set via environment variables or through the `config
 | `EMAIL_FETCH_IDLE`           | Keep a long-lived IMAP connection for near-real-time ingestion (IMAP IDLE)         | `true`  |
 | `EMAIL_FETCH_RETRIES`        | Retry attempts for transient IMAP failures within one cycle                        | `2`     |
 | `EMAIL_FETCH_RETRY_DELAY_MS` | Delay between retry attempts in milliseconds                                       | `10000` |
+| `EMAIL_FETCH_DEADLINE_MS`    | Overall deadline for one fetch run in milliseconds; a stalled connection is aborted (`0` disables) | `300000` |
 
 ## Content and feeds
 
@@ -149,6 +152,18 @@ Configuration values can be set via environment variables or through the `config
   }
 }
 ```
+
+## Reliability
+
+- **Durable ingestion.** Journal appends are fsync'd before they are considered successful. A failed journal write fails the fetch run and leaves the UID marker untouched, so the emails are fetched again on the next run instead of being lost.
+- **Resume marker and UIDVALIDITY.** The resume state lives in `DATA_DIR/last-uid.json` as `{ "uid": ..., "uidvalidity": ... }`. The mailbox UIDVALIDITY is compared on every connection: when it changes (mailbox recreated or migrated), the marker is reset with a warning and the mailbox is re-scanned from UID 1. Existing journal items are kept; message-id deduplication prevents duplicates and retention applies to old items. A legacy `last-uid.txt` marker is imported once (with an unknown UIDVALIDITY that is adopted from the server without resetting the UID) and left in place.
+- **Single-flight fetch.** Startup, cron and IMAP IDLE triggers share one guard: a trigger arriving while a fetch is in progress is skipped (and logged), so runs never overlap and cannot move the marker backwards.
+- **Timeouts.** Fetch connections use `IMAP_SOCKET_TIMEOUT_MS`, the IDLE connection uses `IMAP_IDLE_SOCKET_TIMEOUT_MS`, and every fetch run has an overall `EMAIL_FETCH_DEADLINE_MS` deadline. A connection that ends or closes mid-fetch settles the run instead of hanging it.
+- **Safe purge.** The hourly purge aborts without touching the journal when it cannot read it completely, and rewrites through an fsync'd temporary file followed by a rename, so the journal is never truncated.
+
+## Configuration reload
+
+`config.json` is watched and reloaded without a restart. These values are applied immediately: `EMAIL_FETCH_CRON` (the job is rescheduled), `EMAIL_RETENTION_DAYS`, `EMAIL_FETCH_IDLE` (the IDLE connection is started or stopped), `SENDER_IGNORE_LIST`, `FEED_OVERRIDES`, `FEED_PRIVATE_URLS`, `PUBLIC_URL` and the `EMAIL_FETCH_*` knobs. These are **restart-only** (a warning is logged when they change): `IMAP_HOST`, `IMAP_PORT`, `IMAP_TLS`, `IMAP_USER`, `IMAP_PASSWORD`, `IMAP_MAILBOX`, `DATA_DIR`, `API_PORT` and the OpenTelemetry exporter settings. An unreadable or invalid `config.json` is ignored and the last valid configuration stays active.
 
 ## OpenTelemetry
 

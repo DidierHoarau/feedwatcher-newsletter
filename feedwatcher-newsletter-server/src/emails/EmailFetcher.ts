@@ -8,8 +8,8 @@ import { TimeoutWait } from "../utils-std-ts/Timeout";
 import { FeedIdentityGetFeedId, FeedIdentityIsSenderIgnored } from "../feeds/FeedIdentity";
 import { HtmlSanitizerTextToHtml } from "./HtmlSanitizer";
 import {
-  EmailDataGetLastUid,
-  EmailDataSetLastUid,
+  EmailDataGetUidState,
+  EmailDataSetUidState,
   EmailItemsBatchSave,
   EmailItemsGetExistingIds,
 } from "./EmailsData";
@@ -42,9 +42,11 @@ export async function EmailFetcherFetchEmails(
   const span = OTelTracer().startSpan("EmailFetcherFetchEmails", context);
   logger.info("Fetching emails from IMAP server", span);
 
-  // Load persisted highest UID so we only fetch messages newer than the
-  // previous run.  On the very first run lastUid is 0 → we fetch ALL.
-  const lastUid = EmailDataGetLastUid();
+  // Load the persisted highest UID together with the mailbox UIDVALIDITY it
+  // belongs to. On the very first run both are 0 → we fetch ALL.
+  const storedState = EmailDataGetUidState();
+  let lastUid = storedState.uid;
+  let uidvalidity = storedState.uidvalidity;
   const batchSize = config.EMAIL_FETCH_BATCH_SIZE || 200;
   const runBudget = config.EMAIL_FETCH_RUN_BUDGET || batchSize;
 
@@ -52,7 +54,29 @@ export async function EmailFetcherFetchEmails(
   // fast in-memory Set lookup instead of a disk read for every email.
   const existingIds = EmailItemsGetExistingIds();
 
-  return new Promise((resolve, reject) => {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let deadlineTimer: NodeJS.Timeout | undefined;
+
+    // Every termination path (success, error, connection end/close, deadline)
+    // funnels through here: the timer is cleared and the span ended exactly
+    // once, so a stalled or truncated connection can never leave the run
+    // (or its caller's retry loop) hanging.
+    const finish = (err?: Error): void => {
+      if (settled) return;
+      settled = true;
+      if (deadlineTimer) {
+        clearTimeout(deadlineTimer);
+        deadlineTimer = undefined;
+      }
+      span.end();
+      if (err) {
+        reject(err);
+      } else {
+        resolve();
+      }
+    };
+
     const imap = new Imap({
       user: config.IMAP_USER,
       password: config.IMAP_PASSWORD,
@@ -60,134 +84,250 @@ export async function EmailFetcherFetchEmails(
       port: config.IMAP_PORT,
       tls: config.IMAP_TLS,
       tlsOptions: { rejectUnauthorized: false },
-    });
+      // node-imap supports socketTimeout at runtime; @types/imap predates it.
+      socketTimeout: config.IMAP_SOCKET_TIMEOUT_MS,
+    } as Imap.Config & { socketTimeout: number });
+
+    if (config.EMAIL_FETCH_DEADLINE_MS > 0) {
+      deadlineTimer = setTimeout(() => {
+        const deadlineError = new Error(
+          `IMAP fetch deadline exceeded (${config.EMAIL_FETCH_DEADLINE_MS}ms)`,
+        );
+        logger.error(
+          `IMAP fetch deadline exceeded, aborting the run`,
+          deadlineError,
+          span,
+        );
+        // destroy() rather than end(): LOGOUT can hang on a stalled socket.
+        imap.destroy();
+        finish(deadlineError);
+      }, config.EMAIL_FETCH_DEADLINE_MS);
+    }
 
     imap.once("ready", () => {
-      imap.openBox(config.IMAP_MAILBOX, false, (err, _box) => {
+      imap.openBox(config.IMAP_MAILBOX, false, (err, box) => {
+        if (settled) return;
         if (err) {
           logger.error(`Error opening mailbox`, err, span);
-          imap.end();
-          span.end();
-          reject(err);
+          imap.destroy();
+          finish(err);
           return;
         }
 
-        imap.search(["ALL"], async (searchErr, uids) => {
-          if (searchErr) {
-            logger.error(`Error searching emails`, searchErr, span);
-            imap.end();
-            span.end();
-            reject(searchErr);
-            return;
-          }
-
-          if (!uids || uids.length === 0) {
-            logger.info("No emails found", span);
-            imap.end();
-            span.end();
-            resolve();
-            return;
-          }
-
-          // Filter to UIDs that are newer than the last processed UID.
-          // On the first run (lastUid === 0) this is a no-op.
-          const newUids =
-            lastUid > 0
-              ? (uids as number[]).filter((uid) => uid > lastUid)
-              : uids;
-
-          if (newUids.length === 0) {
-            logger.info("No new emails since last fetch", span);
-            imap.end();
-            span.end();
-            resolve();
-            return;
-          }
-
-          logger.info(
-            `Found ${uids.length} total, ${newUids.length} new (run budget: ${runBudget})`,
-            span,
-          );
-
-          // Catch-up: process successive batches within the same run so a
-          // backlog larger than the batch size drains instead of progressing
-          // one batch per run. Bounded by the per-run budget. A short pause
-          // between batches lets GC and the event loop (liveness probes)
-          // breathe instead of hammering through a whole backlog.
-          let processed = 0;
-          let offset = 0;
-          try {
-            while (offset < newUids.length && processed < runBudget) {
-              const take = Math.min(batchSize, runBudget - processed);
-              const batchUids = newUids.slice(offset, offset + take);
-              const saved = await processBatch(
-                imap,
-                batchUids,
-                existingIds,
+        const serverUidvalidity = Number(box?.uidvalidity) || 0;
+        try {
+          if (serverUidvalidity > 0 && serverUidvalidity !== uidvalidity) {
+            if (uidvalidity === 0) {
+              // First run, or a legacy marker without UIDVALIDITY: adopt the
+              // mailbox value and keep the stored UID (no re-ingestion).
+              uidvalidity = serverUidvalidity;
+              EmailDataSetUidState(lastUid, uidvalidity);
+              logger.info(
+                `IMAP UIDVALIDITY ${serverUidvalidity} recorded for mailbox ${config.IMAP_MAILBOX}`,
                 span,
               );
-              processed += batchUids.length;
-              offset += take;
-              if (saved > 0) {
-                logger.info(
-                  `Saved ${saved} new email(s) (${processed}/${newUids.length} processed this run)`,
-                  span,
-                );
-              }
-              if (offset < newUids.length && processed < runBudget) {
-                await TimeoutWait(BATCH_PAUSE_MS);
-              }
+            } else if (lastUid > 0) {
+              // UIDs are only valid for one UIDVALIDITY: the mailbox was
+              // recreated or migrated and the stored UID is meaningless.
+              // Reset the marker and re-scan; the journal is kept and
+              // message-id deduplication prevents duplicates.
+              logger.warn(
+                `IMAP UIDVALIDITY changed for mailbox ${config.IMAP_MAILBOX} (was ${uidvalidity}, now ${serverUidvalidity}): resetting the UID marker; existing journal items are kept`,
+                span,
+              );
+              lastUid = 0;
+              uidvalidity = serverUidvalidity;
+              EmailDataSetUidState(0, uidvalidity);
+            } else {
+              uidvalidity = serverUidvalidity;
+              EmailDataSetUidState(0, uidvalidity);
             }
-          } catch (loopError) {
-            logger.error(`Error during fetch loop`, loopError as Error, span);
-            imap.end();
-            span.end();
-            reject(loopError as Error);
-            return;
           }
+        } catch (stateError) {
+          logger.error(
+            `Failed to persist the IMAP UID state`,
+            stateError as Error,
+            span,
+          );
+          imap.destroy();
+          finish(stateError as Error);
+          return;
+        }
 
-          imap.end();
-          span.end();
-          resolve();
-        });
+        searchNewUids(imap, lastUid, span)
+          .then(async (newUids) => {
+            if (settled) return;
+            if (newUids.length === 0) {
+              logger.info(
+                lastUid > 0 ? "No new emails since last fetch" : "No emails found",
+                span,
+              );
+              imap.end();
+              finish();
+              return;
+            }
+
+            logger.info(
+              `Found ${newUids.length} new email(s) (run budget: ${runBudget})`,
+              span,
+            );
+
+            // Catch-up: process successive batches within the same run so a
+            // backlog larger than the batch size drains instead of progressing
+            // one batch per run. Bounded by the per-run budget. A short pause
+            // between batches lets GC and the event loop (liveness probes)
+            // breathe instead of hammering through a whole backlog.
+            try {
+              let processed = 0;
+              let offset = 0;
+              while (offset < newUids.length && processed < runBudget && !settled) {
+                const take = Math.min(batchSize, runBudget - processed);
+                const batchUids = newUids.slice(offset, offset + take);
+                const saved = await processBatch(
+                  imap,
+                  batchUids,
+                  existingIds,
+                  span,
+                  uidvalidity,
+                  () => settled,
+                );
+                processed += batchUids.length;
+                offset += take;
+                if (saved > 0) {
+                  logger.info(
+                    `Saved ${saved} new email(s) (${processed}/${newUids.length} processed this run)`,
+                    span,
+                  );
+                }
+                if (offset < newUids.length && processed < runBudget && !settled) {
+                  await TimeoutWait(BATCH_PAUSE_MS);
+                }
+              }
+            } catch (loopError) {
+              logger.error(`Error during fetch loop`, loopError as Error, span);
+              imap.destroy();
+              finish(loopError as Error);
+              return;
+            }
+
+            if (settled) return;
+            imap.end();
+            finish();
+          })
+          .catch((searchErr) => {
+            if (settled) return;
+            logger.error(`Error searching emails`, searchErr, span);
+            imap.destroy();
+            finish(searchErr);
+          });
       });
     });
 
     imap.once("error", (err) => {
       logger.error(`IMAP connection error`, err, span);
-      span.end();
-      reject(err);
+      imap.destroy();
+      finish(err);
     });
 
     imap.once("end", () => {
-      logger.info("IMAP connection ended", span);
+      if (settled) return;
+      const endError = new Error(
+        "IMAP connection ended before the fetch completed",
+      );
+      logger.error(
+        `IMAP connection ended before the fetch completed`,
+        endError,
+        span,
+      );
+      finish(endError);
+    });
+
+    imap.once("close", () => {
+      if (settled) return;
+      const closeError = new Error(
+        "IMAP connection closed before the fetch completed",
+      );
+      logger.error(
+        `IMAP connection closed before the fetch completed`,
+        closeError,
+        span,
+      );
+      finish(closeError);
     });
 
     imap.connect();
   });
 }
 
+// Search for UIDs newer than lastUid. A UID range keeps the search cheap on a
+// large mailbox; some servers do not support it, so fall back to ALL and
+// filter locally. Note that `n:*` also returns the highest UID when it is
+// below n, hence the explicit filter plus ascending sort.
+function searchNewUids(
+  imap: Imap,
+  lastUid: number,
+  span: Span,
+): Promise<number[]> {
+  const filterAndSort = (uids: number[] | undefined): number[] =>
+    (uids || [])
+      .filter((uid) => uid > lastUid)
+      .sort((a, b) => a - b);
+  return new Promise<number[]>((searchResolve, searchReject) => {
+    const searchAll = (): void => {
+      imap.search(["ALL"], (err, allUids) => {
+        if (err) {
+          searchReject(err);
+          return;
+        }
+        searchResolve(filterAndSort(allUids));
+      });
+    };
+    if (lastUid <= 0) {
+      searchAll();
+      return;
+    }
+    imap.search([["UID", `${lastUid + 1}:*`]], (err, uids) => {
+      if (err) {
+        logger.warn(
+          `UID range search failed, falling back to a full mailbox search`,
+          span,
+        );
+        searchAll();
+        return;
+      }
+      searchResolve(filterAndSort(uids));
+    });
+  });
+}
+
 // Fetch, parse and persist one batch of UIDs, in bounded slices: memory stays
 // proportional to a slice (50 emails), never to the whole batch or backlog.
-// The last-uid marker advances after each slice so an interrupted run resumes
-// where it stopped.
+// The last-uid marker advances after each slice only once its items are
+// durably saved, so an interrupted run resumes where it stopped without ever
+// skipping emails whose write failed.
 async function processBatch(
   imap: Imap,
   batchUids: number[],
   existingIds: Set<string>,
   span: Span,
+  uidvalidity: number,
+  isSettled: () => boolean,
 ): Promise<number> {
   let savedTotal = 0;
   for (let offset = 0; offset < batchUids.length; offset += FETCH_SLICE_SIZE) {
+    if (isSettled()) break;
     const sliceUids = batchUids.slice(offset, offset + FETCH_SLICE_SIZE);
     const rawEmails = await fetchSlice(imap, sliceUids, span);
+    if (isSettled()) break;
     const saved = await parseAndSaveSlice(rawEmails, existingIds, span);
     savedTotal += saved;
 
     // Persist the highest UID of this slice so the next fetch (or the next
-    // run) only retrieves messages beyond this point.
+    // run) only retrieves messages beyond this point. EmailItemsBatchSave
+    // throws when the append is not durable, which aborts the run and leaves
+    // the marker untouched.
     const maxUid = Math.max(...sliceUids);
-    EmailDataSetLastUid(maxUid);
+    EmailDataSetUidState(maxUid, uidvalidity);
     logger.info(
       `Slice of ${sliceUids.length} email(s) processed, next fetch will skip UIDs <= ${maxUid}`,
       span,
@@ -200,26 +340,66 @@ async function processBatch(
   return savedTotal;
 }
 
-// Fetch the raw sources of one slice of UIDs.
+// Fetch the raw sources of one slice of UIDs. The slice promise also settles
+// when the connection ends or errors while it is pending, so a truncated
+// connection cannot leave the fetch loop waiting forever.
 function fetchSlice(
   imap: Imap,
   sliceUids: number[],
   span: Span,
 ): Promise<string[]> {
   return new Promise<string[]>((sliceResolve, sliceReject) => {
+    let sliceSettled = false;
     const rawEmails: string[] = [];
-    const fetch = imap.fetch(sliceUids, { bodies: "" });
     const streamPromises: Promise<void>[] = [];
 
-    fetch.on("message", (_msg, seqno) => {
+    const cleanup = (): void => {
+      imap.removeListener("end", onConnectionLost);
+      imap.removeListener("close", onConnectionLost);
+      imap.removeListener("error", onConnectionLost);
+    };
+    const settleResolve = (value: string[]): void => {
+      if (sliceSettled) return;
+      sliceSettled = true;
+      cleanup();
+      sliceResolve(value);
+    };
+    const settleReject = (err: Error): void => {
+      if (sliceSettled) return;
+      sliceSettled = true;
+      cleanup();
+      sliceReject(err);
+    };
+    function onConnectionLost(err?: Error): void {
+      settleReject(
+        err instanceof Error
+          ? err
+          : new Error("IMAP connection ended before the fetch slice completed"),
+      );
+    }
+    imap.on("end", onConnectionLost);
+    imap.on("close", onConnectionLost);
+    imap.on("error", onConnectionLost);
+
+    let fetch;
+    try {
+      fetch = imap.fetch(sliceUids, { bodies: "" });
+    } catch (fetchErr) {
+      settleReject(fetchErr as Error);
+      return;
+    }
+
+    fetch.on("message", (msg) => {
       const streamPromise = new Promise<void>((msgResolve) => {
         let rawEmail = "";
-        _msg.on("body", (stream) => {
+        msg.on("body", (stream) => {
           stream.on("data", (chunk) => {
             rawEmail += chunk.toString("utf8");
           });
           stream.once("end", () => {
-            rawEmails[seqno] = rawEmail;
+            // Dense array: entries are appended in completion order instead
+            // of indexing by mailbox sequence number (sparse arrays).
+            rawEmails.push(rawEmail);
             msgResolve();
           });
         });
@@ -229,15 +409,15 @@ function fetchSlice(
 
     fetch.once("error", (fetchErr) => {
       logger.error(`Fetch error`, fetchErr, span);
-      sliceReject(fetchErr);
+      settleReject(fetchErr);
     });
 
     fetch.once("end", async () => {
       try {
         await Promise.all(streamPromises);
-        sliceResolve(rawEmails);
+        settleResolve(rawEmails);
       } catch (endError) {
-        sliceReject(endError as Error);
+        settleReject(endError as Error);
       }
     });
   });
@@ -262,7 +442,9 @@ async function parseAndSaveSlice(
 
       try {
         const parsed = await simpleParser(rawEmail);
-        const messageId = parsed.messageId || `no-id-${Date.now()}`;
+        // A UUID cannot collide between distinct messages, unlike a
+        // millisecond timestamp.
+        const messageId = parsed.messageId || `no-id-${uuidv4()}`;
 
         if (existingIds.has(messageId)) continue;
 

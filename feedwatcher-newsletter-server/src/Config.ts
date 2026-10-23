@@ -14,7 +14,7 @@ export class Config extends ConfigBase {
   public EMAIL_FETCH_CRON = "0 * * * *";
 
   // Retention: keep emails for 3 days by default
-  public EMAIL_RETENTION_DAYS = 7;
+  public EMAIL_RETENTION_DAYS = 3;
 
   // Batch: max emails to process per fetch (prevents unbounded run time)
   public EMAIL_FETCH_BATCH_SIZE = 200;
@@ -27,6 +27,13 @@ export class Config extends ConfigBase {
   // Retry: attempts for transient IMAP failures within one cycle
   public EMAIL_FETCH_RETRIES = 2;
   public EMAIL_FETCH_RETRY_DELAY_MS = 10000;
+
+  // Timeouts: node-imap's socketTimeout protects a stalled fetch connection;
+  // the fetch deadline bounds a whole run regardless of socket activity.
+  // 0 disables the corresponding timeout.
+  public IMAP_SOCKET_TIMEOUT_MS = 120000;
+  public IMAP_IDLE_SOCKET_TIMEOUT_MS = 600000;
+  public EMAIL_FETCH_DEADLINE_MS = 300000;
 
   // IDLE: keep a long-lived IMAP connection for near-real-time ingestion,
   // with the cron schedule kept as fallback
@@ -65,6 +72,9 @@ export class Config extends ConfigBase {
     this.addConfigField({ field: "EMAIL_FETCH_RUN_BUDGET" });
     this.addConfigField({ field: "EMAIL_FETCH_RETRIES" });
     this.addConfigField({ field: "EMAIL_FETCH_RETRY_DELAY_MS" });
+    this.addConfigField({ field: "IMAP_SOCKET_TIMEOUT_MS" });
+    this.addConfigField({ field: "IMAP_IDLE_SOCKET_TIMEOUT_MS" });
+    this.addConfigField({ field: "EMAIL_FETCH_DEADLINE_MS" });
     this.addConfigField({ field: "EMAIL_FETCH_IDLE" });
     this.addConfigField({ field: "EMAIL_STRIP_TRACKING_PIXELS" });
     this.addConfigField({ field: "FEED_PRIVATE_URLS" });
