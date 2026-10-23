@@ -251,4 +251,20 @@ describe("SchedulerReload", () => {
       expect.stringContaining("IMAP_PASSWORD"),
     );
   });
+
+  it("warns when the IMAP TLS settings change", async () => {
+    await SchedulerInit(makeSpan(), makeConfig());
+    await flushAsync();
+
+    const config = makeConfig();
+    config.IMAP_TLS_INSECURE = true;
+    config.IMAP_TLS_CA_FILE = "/certs/private-ca.pem";
+    SchedulerReload(config);
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "IMAP_TLS_INSECURE, IMAP_TLS_CA_FILE",
+      ),
+    );
+  });
 });

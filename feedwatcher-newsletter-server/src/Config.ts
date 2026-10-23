@@ -10,6 +10,12 @@ export class Config extends ConfigBase {
   public IMAP_PASSWORD = "";
   public IMAP_MAILBOX = "INBOX";
 
+  // TLS: the server certificate is verified against the system CA store by
+  // default. IMAP_TLS_INSECURE disables verification (unsafe, opt-in only);
+  // IMAP_TLS_CA_FILE adds extra trust anchors (e.g. a self-hosted CA).
+  public IMAP_TLS_INSECURE = false;
+  public IMAP_TLS_CA_FILE = "";
+
   // Schedule: hourly by default
   public EMAIL_FETCH_CRON = "0 * * * *";
 
@@ -28,9 +34,9 @@ export class Config extends ConfigBase {
   public EMAIL_FETCH_RETRIES = 2;
   public EMAIL_FETCH_RETRY_DELAY_MS = 10000;
 
-  // Timeouts: node-imap's socketTimeout protects a stalled fetch connection;
-  // the fetch deadline bounds a whole run regardless of socket activity.
-  // 0 disables the corresponding timeout.
+  // Timeouts: the IMAP client's socketTimeout protects a stalled fetch
+  // connection; the fetch deadline bounds a whole run regardless of socket
+  // activity. 0 disables the corresponding timeout.
   public IMAP_SOCKET_TIMEOUT_MS = 120000;
   public IMAP_IDLE_SOCKET_TIMEOUT_MS = 600000;
   public EMAIL_FETCH_DEADLINE_MS = 300000;
@@ -80,6 +86,8 @@ export class Config extends ConfigBase {
     this.addConfigField({ field: "IMAP_USER" });
     this.addConfigField({ field: "IMAP_PASSWORD", sensitive: true });
     this.addConfigField({ field: "IMAP_MAILBOX" });
+    this.addConfigField({ field: "IMAP_TLS_INSECURE" });
+    this.addConfigField({ field: "IMAP_TLS_CA_FILE" });
     this.addConfigField({ field: "EMAIL_FETCH_CRON" });
     this.addConfigField({ field: "EMAIL_RETENTION_DAYS" });
     this.addConfigField({ field: "EMAIL_FETCH_BATCH_SIZE" });

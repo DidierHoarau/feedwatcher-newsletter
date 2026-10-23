@@ -36,4 +36,11 @@ describe("Config", () => {
     expect(config.FEED_PRIVATE_URLS_STRICT).toBe(false);
     expect(config.TRUST_PROXY).toBe(false);
   });
+
+  it("verifies IMAP TLS by default and has no CA override", () => {
+    const config = new Config();
+    expect(config.IMAP_TLS).toBe(true);
+    expect(config.IMAP_TLS_INSECURE).toBe(false);
+    expect(config.IMAP_TLS_CA_FILE).toBe("");
+  });
 });

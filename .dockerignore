@@ -1,0 +1,10 @@
+.git
+.github
+node_modules
+**/node_modules
+**/dist
+**/coverage
+docs
+.env
+env-dev.js
+**/*.md

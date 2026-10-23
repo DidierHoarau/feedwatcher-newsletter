@@ -106,8 +106,9 @@ const SHARED_CSS = `
   .back { display: inline-block; margin-bottom: 1rem; }
 `;
 
-function copyScript(): string {
-  return `
+// Inline copy-to-clipboard script. Its exact text is hashed for the CSP, so
+// keep body and policy in sync by importing this constant in both places.
+export const COPY_SCRIPT = `
   document.querySelectorAll("button.copy[data-url]").forEach(function (button) {
     button.addEventListener("click", function () {
       navigator.clipboard.writeText(button.getAttribute("data-url") || "").then(function () {
@@ -118,7 +119,6 @@ function copyScript(): string {
     });
   });
 `;
-}
 
 export function renderFeedsIndexPage(feeds: FeedForIndex[]): string {
   const items = feeds
@@ -149,7 +149,7 @@ export function renderFeedsIndexPage(feeds: FeedForIndex[]): string {
   <ul class="feed-list">${items}
   </ul>
 </main>
-<script>${copyScript()}</script>
+<script>${COPY_SCRIPT}</script>
 </body>
 </html>
 `;

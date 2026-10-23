@@ -1,6 +1,11 @@
-import Imap from "imap";
+import { ImapFlow } from "imapflow";
 import { Config } from "../Config";
 import { OTelLogger } from "../OTelContext";
+import {
+  BuildImapFlowOptions,
+  ImapLogConnectionError,
+  ImapLogConnectionEstablished,
+} from "./ImapConnection";
 
 const logger = OTelLogger().createModuleLogger("IdleWatcher");
 
@@ -15,7 +20,7 @@ let running = false;
 let reconnectDelay = RECONNECT_BASE_DELAY_MS;
 let debounceTimer: NodeJS.Timeout | undefined;
 let reconnectTimer: NodeJS.Timeout | undefined;
-let connection: Imap | undefined;
+let connection: ImapFlow | undefined;
 // Functions as a fence for stale connection events: after a stop or a
 // reconnect, handlers of an old socket must not schedule fetches or open
 // another connection on top of the current one.
@@ -56,7 +61,7 @@ export function IdleWatcherStop(): void {
     reconnectTimer = undefined;
   }
   if (connection) {
-    connection.destroy();
+    connection.close();
     connection = undefined;
   }
   reconnectDelay = RECONNECT_BASE_DELAY_MS;
@@ -68,54 +73,63 @@ function connect(): void {
   logger.info(
     `Opening IMAP IDLE connection to ${config.IMAP_HOST}:${config.IMAP_PORT}`,
   );
-  const imap = new Imap({
-    user: config.IMAP_USER,
-    password: config.IMAP_PASSWORD,
-    host: config.IMAP_HOST,
-    port: config.IMAP_PORT,
-    tls: config.IMAP_TLS,
-    tlsOptions: { rejectUnauthorized: false },
-    // Must exceed node-imap's 300 s IDLE re-send interval, otherwise the
-    // socket timeout would kill a healthy idle connection.
-    socketTimeout: config.IMAP_IDLE_SOCKET_TIMEOUT_MS,
-  } as Imap.Config & { socketTimeout: number });
-  connection = imap;
 
-  imap.once("ready", () => {
+  let client: ImapFlow;
+  try {
+    // Auto-IDLE stays enabled: imapflow re-enters IDLE after commands and
+    // keeps the IDLE session alive.
+    client = new ImapFlow(
+      BuildImapFlowOptions(config, config.IMAP_IDLE_SOCKET_TIMEOUT_MS, false),
+    );
+  } catch (err) {
+    logger.error(`Unable to configure the IMAP IDLE connection`, err as Error);
+    scheduleReconnect();
+    return;
+  }
+  connection = client;
+
+  client.on("error", (err) => {
     if (connectionGeneration !== generation) return;
-    reconnectDelay = RECONNECT_BASE_DELAY_MS;
-    imap.openBox(config.IMAP_MAILBOX, true, (err) => {
-      if (connectionGeneration !== generation) return;
-      if (err) {
-        logger.error(`Error opening mailbox for IDLE`, err);
-        // destroy() closes the socket and triggers the close handler below,
-        // which schedules the reconnect.
-        imap.destroy();
-        return;
-      }
-      logger.info("IMAP IDLE listening for new mail");
-      imap.on("mail", (numNewMail: number) => {
-        if (connectionGeneration !== generation) return;
-        logger.info(`IMAP IDLE: ${numNewMail} new mail(s) detected`);
-        scheduleFetch();
-      });
-    });
+    ImapLogConnectionError("IMAP IDLE connection error", err, config);
   });
 
-  imap.once("error", (err) => {
+  client.once("close", () => {
     if (connectionGeneration !== generation) return;
-    logger.error(`IMAP IDLE connection error`, err);
-    imap.destroy();
-  });
-
-  imap.once("close", (hadError: boolean) => {
-    if (connectionGeneration !== generation) return;
-    logger.info(`IMAP IDLE connection closed (error: ${hadError})`);
+    logger.info(`IMAP IDLE connection closed`);
     connection = undefined;
     scheduleReconnect();
   });
 
-  imap.connect();
+  void (async () => {
+    try {
+      await client.connect();
+      if (connectionGeneration !== generation) {
+        client.close();
+        return;
+      }
+      reconnectDelay = RECONNECT_BASE_DELAY_MS;
+      await client.mailboxOpen(config.IMAP_MAILBOX, { readOnly: true });
+      if (connectionGeneration !== generation) {
+        client.close();
+        return;
+      }
+      ImapLogConnectionEstablished(config);
+      logger.info("IMAP IDLE listening for new mail");
+      client.on("exists", (data) => {
+        if (connectionGeneration !== generation) return;
+        logger.info(
+          `IMAP IDLE: ${data.count - data.prevCount} new mail(s) detected`,
+        );
+        scheduleFetch();
+      });
+    } catch (err) {
+      if (connectionGeneration !== generation) return;
+      ImapLogConnectionError("IMAP IDLE connection error", err, config);
+      // close() triggers the close handler above, which schedules the
+      // reconnect with backoff.
+      client.close();
+    }
+  })();
 }
 
 function scheduleReconnect(): void {

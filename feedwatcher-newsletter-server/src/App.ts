@@ -13,6 +13,9 @@ import { SchedulerInit, SchedulerReload } from "./Scheduler";
 const logger = OTelLogger().createModuleLogger("app");
 
 logger.info("====== Starting FeedWatcher Newsletter Server ======");
+logger.info(
+  `Process identity: uid=${typeof process.getuid === "function" ? process.getuid() : "n/a"} gid=${typeof process.getgid === "function" ? process.getgid() : "n/a"}`,
+);
 
 Promise.resolve().then(async () => {
   //

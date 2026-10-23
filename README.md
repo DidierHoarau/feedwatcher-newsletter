@@ -16,6 +16,8 @@ FeedWatcher Newsletter is designed to be deployed as a container.
 
 - This image exposes port `8080`
 - The data volume is located at `/data`
+- The container runs as the unprivileged `node` user (uid 1000); `/data` must be writable by that user (the image creates and owns it by default)
+- The runtime image contains production dependencies only (`npm prune --omit=dev`) and ships the CA certificates required for IMAP TLS verification
 
 ## Docker
 
@@ -101,6 +103,12 @@ spec:
 
 By default the service has **no authentication**: anyone who can reach the host can list the feeds (`/rss/` HTML index and JSON list), fetch any feed and open any email at `/view/:emailId`. `FEED_PRIVATE_URLS` only obfuscates feed URLs (`<feedId>.<token>`): the index and the OPML export publish those URLs to every caller, and bare feed ids keep working unless strict private mode is enabled. Treat tokenized URLs as a convenience, not as access control. `SENDER_IGNORE_LIST` is enforced on every read path, so ignored senders are never listed and their feeds and permalinks are never served.
 
+IMAP connections verify the server certificate by default (see [IMAP](#imap)). HTML pages are served with a Content-Security-Policy (hash-based for the inline copy script, so ETag/304 caching still works) and every response carries `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and a restrictive `Permissions-Policy`. RSS, JSON and OPML payloads get the same baseline headers without the CSP.
+
+## Dependency audit
+
+`npm audit --omit=dev` is a blocking CI gate on pull requests and on main: an unallowlisted high or critical production advisory fails the build. Exceptions, if ever needed, go to `.github/audit-allowlist.json` with an advisory id, package, scope, expiry date, reason and owner. The IMAP client is the maintained `imapflow`; the transitive `follow-redirects` and `source-map-js` versions are pinned through `overrides` in `feedwatcher-newsletter-server/package.json`.
+
 ## HTTP Basic authentication (optional)
 
 Set `AUTH_PASSWORD` (and optionally `AUTH_USERNAME`, default `feedwatcher`) to require HTTP Basic credentials on `/`, `/rss/*` and `/view/*`. `/api/status` stays open for readiness probes. Authentication is disabled while `AUTH_PASSWORD` is empty, so an unchanged deployment keeps serving existing subscribers. Configure every feed reader (and browser) with the same credentials, and only send them over HTTPS. The password is registered as sensitive and masked in configuration logs; `AUTH_USERNAME` and `AUTH_PASSWORD` are applied on hot configuration reload.
@@ -127,8 +135,12 @@ Configuration values can be set via environment variables or through the `config
 | `IMAP_USER`     | IMAP account username              |         |
 | `IMAP_PASSWORD` | IMAP account password              |         |
 | `IMAP_MAILBOX`  | Mailbox folder to read emails from | `INBOX` |
+| `IMAP_TLS_INSECURE` | **Unsafe.** Disable TLS certificate verification for the IMAP server (the server identity is then not authenticated). Restart-only. | `false` |
+| `IMAP_TLS_CA_FILE` | Path to an extra PEM CA bundle trusted in addition to the system/public roots, e.g. for a self-hosted server with a private CA. Restart-only. | `` (empty) |
 | `IMAP_SOCKET_TIMEOUT_MS` | Socket inactivity timeout for fetch connections in milliseconds (`0` disables) | `120000` |
 | `IMAP_IDLE_SOCKET_TIMEOUT_MS` | Socket inactivity timeout for the IDLE connection in milliseconds; must exceed the 300 s IDLE keepalive (`0` disables) | `600000` |
+
+The IMAP server certificate is verified against the system CA store by default (`node:24-alpine` plus the `ca-certificates` package in the image). Keep verification enabled: `IMAP_TLS_INSECURE=true` is the only, deliberately loud, way to bypass it and should only be used temporarily for a server whose certificate cannot be fixed. TLS failures are logged with an actionable hint and never trigger a silent fallback to an unverified connection.
 
 ## General
 
@@ -198,7 +210,7 @@ When authentication is enabled (non-empty `AUTH_PASSWORD`), every endpoint excep
 
 ## Configuration reload
 
-`config.json` is watched and reloaded without a restart. These values are applied immediately: `EMAIL_FETCH_CRON` (the job is rescheduled), `EMAIL_RETENTION_DAYS`, `EMAIL_FETCH_IDLE` (the IDLE connection is started or stopped), `SENDER_IGNORE_LIST`, `FEED_OVERRIDES`, `FEED_PRIVATE_URLS`, `FEED_PRIVATE_URLS_STRICT`, `AUTH_USERNAME`, `AUTH_PASSWORD`, `PUBLIC_URL` and the `EMAIL_FETCH_*` knobs. These are **restart-only** (a warning is logged when they change): `IMAP_HOST`, `IMAP_PORT`, `IMAP_TLS`, `IMAP_USER`, `IMAP_PASSWORD`, `IMAP_MAILBOX`, `DATA_DIR`, `API_PORT`, `TRUST_PROXY` and the OpenTelemetry exporter settings. An unreadable or invalid `config.json` is ignored and the last valid configuration stays active.
+`config.json` is watched and reloaded without a restart. These values are applied immediately: `EMAIL_FETCH_CRON` (the job is rescheduled), `EMAIL_RETENTION_DAYS`, `EMAIL_FETCH_IDLE` (the IDLE connection is started or stopped), `SENDER_IGNORE_LIST`, `FEED_OVERRIDES`, `FEED_PRIVATE_URLS`, `FEED_PRIVATE_URLS_STRICT`, `AUTH_USERNAME`, `AUTH_PASSWORD`, `PUBLIC_URL` and the `EMAIL_FETCH_*` knobs. These are **restart-only** (a warning is logged when they change): `IMAP_HOST`, `IMAP_PORT`, `IMAP_TLS`, `IMAP_USER`, `IMAP_PASSWORD`, `IMAP_MAILBOX`, `IMAP_TLS_INSECURE`, `IMAP_TLS_CA_FILE`, `DATA_DIR`, `API_PORT`, `TRUST_PROXY` and the OpenTelemetry exporter settings. An unreadable or invalid `config.json` is ignored and the last valid configuration stays active.
 
 ## OpenTelemetry
 
