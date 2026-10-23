@@ -35,46 +35,41 @@ const READ_CHUNK_BYTES = 1024 * 1024;
 // string, invoking the handler for every valid record. Readers aggregate on
 // the fly instead of materializing the whole store in memory; the journal may
 // hold several records per message, the LAST one being the current state.
+// I/O errors propagate: a partially read journal must never be mistaken for
+// the real store (callers decide how to surface the failure).
 function walkJournalLines(handleLine: (item: EmailItem) => void): void {
+  if (!fse.existsSync(journalFilePath)) {
+    return;
+  }
+  const fd = fse.openSync(journalFilePath, "r");
   try {
-    if (!fse.existsSync(journalFilePath)) {
-      return;
-    }
-    const fd = fse.openSync(journalFilePath, "r");
-    try {
-      const chunk = Buffer.alloc(READ_CHUNK_BYTES);
-      const decoder = new StringDecoder("utf8");
-      let carry = "";
-      let bytesRead = 0;
-      const processLine = (line: string): void => {
-        if (!line.trim()) return;
-        try {
-          const item = JSON.parse(line) as EmailItem;
-          if (item && item.messageId) {
-            handleLine(item);
-          }
-        } catch {
-          // Skip a malformed/partial line rather than losing the store.
+    const chunk = Buffer.alloc(READ_CHUNK_BYTES);
+    const decoder = new StringDecoder("utf8");
+    let carry = "";
+    let bytesRead = 0;
+    const processLine = (line: string): void => {
+      if (!line.trim()) return;
+      try {
+        const item = JSON.parse(line) as EmailItem;
+        if (item && item.messageId) {
+          handleLine(item);
         }
-      };
-      while ((bytesRead = fse.readSync(fd, chunk, 0, READ_CHUNK_BYTES, null)) > 0) {
-        const text = carry + decoder.write(chunk.subarray(0, bytesRead));
-        const lines = text.split("\n");
-        carry = lines.pop() || "";
-        for (const line of lines) {
-          processLine(line);
-        }
+      } catch {
+        // Skip a malformed/partial line rather than losing the store.
       }
-      carry += decoder.end();
-      processLine(carry);
-    } finally {
-      fse.closeSync(fd);
+    };
+    while ((bytesRead = fse.readSync(fd, chunk, 0, READ_CHUNK_BYTES, null)) > 0) {
+      const text = carry + decoder.write(chunk.subarray(0, bytesRead));
+      const lines = text.split("\n");
+      carry = lines.pop() || "";
+      for (const line of lines) {
+        processLine(line);
+      }
     }
-  } catch (err) {
-    logger.error(
-      `Failed to load email journal from ${journalFilePath}`,
-      err as Error,
-    );
+    carry += decoder.end();
+    processLine(carry);
+  } finally {
+    fse.closeSync(fd);
   }
 }
 
@@ -107,23 +102,41 @@ export function EmailsDataInit(
   configuredRetentionDays: number,
   dataDir: string,
 ): void {
-  retentionDays = configuredRetentionDays;
+  EmailsDataSetRetentionDays(configuredRetentionDays);
   journalFilePath = path.join(dataDir, "emails.jsonl");
   legacyFilePath = path.join(dataDir, "emails.json");
   migrateLegacyStore();
-  logger.info(`Email retention configured to ${retentionDays} day(s)`);
   logger.info(`Email data file: ${journalFilePath}`);
 }
 
-// Append the new items as journal lines.
+// Append the new items as journal lines. Only a durable append (fsync before
+// close) counts as success: callers must not advance the UID marker otherwise,
+// or a failed write would lose the emails permanently.
 export function EmailItemsBatchSave(items: EmailItem[]): void {
   if (items.length === 0) return;
   try {
     fse.ensureDirSync(path.dirname(journalFilePath));
     const lines = items.map((item) => JSON.stringify(item)).join("\n");
-    fse.appendFileSync(journalFilePath, lines + "\n");
+    const fd = fse.openSync(journalFilePath, "a+");
+    try {
+      // Isolate a partial line left by a previous failed write: without a
+      // leading newline the new records would be glued to the fragment.
+      const size = fse.fstatSync(fd).size;
+      if (size > 0) {
+        const lastByte = Buffer.alloc(1);
+        fse.readSync(fd, lastByte, 0, 1, size - 1);
+        if (lastByte.toString("utf8") !== "\n") {
+          fse.writeSync(fd, "\n");
+        }
+      }
+      fse.writeSync(fd, lines + "\n");
+      fse.fsyncSync(fd);
+    } finally {
+      fse.closeSync(fd);
+    }
   } catch (err) {
     logger.error(`Failed to append to email journal`, err as Error);
+    throw err;
   }
 }
 
@@ -238,67 +251,138 @@ export function EmailSendersListAll(): {
 
 // Compaction: keep only the last record of each non-expired message, in two
 // streaming passes with O(message-ids) memory — the store is never
-// materialized.
+// materialized. Any read or write error aborts the purge without touching the
+// journal: rewriting it from a partial read would truncate data.
 export function EmailsDataPurgeExpired(): void {
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
   const last = new Map<string, { index: number; expired: boolean }>();
   let recordIndex = 0;
-  walkJournalLines((item) => {
-    last.set(item.messageId, {
-      index: recordIndex++,
-      expired: new Date(item.dateReceived).getTime() < cutoff,
-    });
-  });
-  const expiredCount = Array.from(last.values()).filter((e) => e.expired).length;
-  if (expiredCount === 0) {
-    return;
-  }
-  const tmpPath = `${journalFilePath}.tmp`;
-  fse.ensureDirSync(path.dirname(journalFilePath));
-  const out = fse.openSync(tmpPath, "w");
+  let tmpPath = "";
   try {
-    recordIndex = 0;
     walkJournalLines((item) => {
-      const state = last.get(item.messageId);
-      if (state && state.index === recordIndex && !state.expired) {
-        fse.writeSync(out, JSON.stringify(item) + "\n");
-      }
-      recordIndex++;
+      last.set(item.messageId, {
+        index: recordIndex++,
+        expired: new Date(item.dateReceived).getTime() < cutoff,
+      });
     });
-  } finally {
-    fse.closeSync(out);
+    const expiredCount = Array.from(last.values()).filter((e) => e.expired).length;
+    if (expiredCount === 0) {
+      return;
+    }
+    tmpPath = `${journalFilePath}.tmp`;
+    fse.ensureDirSync(path.dirname(journalFilePath));
+    const out = fse.openSync(tmpPath, "w");
+    try {
+      recordIndex = 0;
+      walkJournalLines((item) => {
+        const state = last.get(item.messageId);
+        if (state && state.index === recordIndex && !state.expired) {
+          fse.writeSync(out, JSON.stringify(item) + "\n");
+        }
+        recordIndex++;
+      });
+      fse.fsyncSync(out);
+    } finally {
+      fse.closeSync(out);
+    }
+    fse.renameSync(tmpPath, journalFilePath);
+    tmpPath = "";
+    logger.info(
+      `Purged ${expiredCount} expired email(s) older than ${retentionDays} day(s)`,
+    );
+  } catch (err) {
+    if (tmpPath) {
+      try {
+        fse.unlinkSync(tmpPath);
+      } catch {
+        // The temp file may not exist; nothing to clean up.
+      }
+    }
+    logger.error(
+      `Purge aborted, email journal left untouched`,
+      err as Error,
+    );
   }
-  fse.renameSync(tmpPath, journalFilePath);
-  logger.info(
-    `Purged ${expiredCount} expired email(s) older than ${retentionDays} day(s)`,
-  );
 }
 
 // ---------------------------------------------------------------------------
-// Incremental IMAP UID tracking — persist last processed UID so subsequent
-// fetches only retrieve messages newer than the previous run.
+// Incremental IMAP UID tracking — persist the last processed UID together with
+// the mailbox UIDVALIDITY it belongs to. IMAP UIDs are only meaningful for a
+// given UIDVALIDITY: when a mailbox is recreated or migrated, UIDs restart at
+// a lower value and a stale marker would silently stop ingestion.
 // ---------------------------------------------------------------------------
 
-export function EmailDataGetLastUid(): number {
-  const filePath = path.join(path.dirname(journalFilePath), "last-uid.txt");
+export interface EmailUidState {
+  uid: number;
+  uidvalidity: number;
+}
+
+function getUidStateFilePath(): string {
+  return path.join(path.dirname(journalFilePath), "last-uid.json");
+}
+
+export function EmailDataGetUidState(): EmailUidState {
+  const jsonPath = getUidStateFilePath();
   try {
-    if (fse.existsSync(filePath)) {
-      return parseInt(fse.readFileSync(filePath, "utf8").trim(), 10);
+    if (fse.existsSync(jsonPath)) {
+      const state = fse.readJsonSync(jsonPath) as Partial<EmailUidState>;
+      const uid = Number(state?.uid);
+      const uidvalidity = Number(state?.uidvalidity);
+      if (Number.isFinite(uid) && Number.isFinite(uidvalidity)) {
+        return { uid, uidvalidity };
+      }
+      logger.error(`Invalid last UID state in ${jsonPath}: ${JSON.stringify(state)}`);
+      return { uid: 0, uidvalidity: 0 };
+    }
+    // Legacy marker: keep the UID, UIDVALIDITY is unknown (0) and adopted
+    // from the mailbox on the next fetch. The legacy file is left untouched
+    // so a rollback to the previous version still resumes correctly.
+    const legacyPath = path.join(path.dirname(journalFilePath), "last-uid.txt");
+    if (fse.existsSync(legacyPath)) {
+      const uid = parseInt(fse.readFileSync(legacyPath, "utf8").trim(), 10);
+      if (Number.isFinite(uid)) {
+        return { uid, uidvalidity: 0 };
+      }
     }
   } catch (err) {
-    logger.error(`Failed to read last UID from ${filePath}`, err as Error);
+    logger.error(`Failed to read last UID state from ${jsonPath}`, err as Error);
   }
-  return 0;
+  // A full re-scan is safe: message-id deduplication keeps re-saved items
+  // from duplicating.
+  return { uid: 0, uidvalidity: 0 };
 }
 
-export function EmailDataSetLastUid(uid: number): void {
-  const filePath = path.join(path.dirname(journalFilePath), "last-uid.txt");
+export function EmailDataSetUidState(uid: number, uidvalidity: number): void {
+  const jsonPath = getUidStateFilePath();
+  const tmpPath = `${jsonPath}.tmp`;
   try {
-    fse.ensureDirSync(path.dirname(filePath));
-    fse.writeFileSync(filePath, String(uid));
+    fse.ensureDirSync(path.dirname(jsonPath));
+    const fd = fse.openSync(tmpPath, "w");
+    try {
+      fse.writeSync(fd, JSON.stringify({ uid, uidvalidity }));
+      fse.fsyncSync(fd);
+    } finally {
+      fse.closeSync(fd);
+    }
+    fse.renameSync(tmpPath, jsonPath);
   } catch (err) {
-    logger.error(`Failed to save last UID to ${filePath}`, err as Error);
+    try {
+      fse.unlinkSync(tmpPath);
+    } catch {
+      // The temp file may not exist; nothing to clean up.
+    }
+    logger.error(`Failed to save last UID state to ${jsonPath}`, err as Error);
+    throw err;
   }
+}
+
+export function EmailsDataSetRetentionDays(days: number): void {
+  if (!Number.isFinite(days) || days <= 0) {
+    logger.warn(`Ignoring invalid EMAIL_RETENTION_DAYS value: ${days}`);
+    return;
+  }
+  retentionDays = days;
+  logger.info(`Email retention configured to ${retentionDays} day(s)`);
 }
 
 // Read existing message-IDs once so callers can deduplicate without

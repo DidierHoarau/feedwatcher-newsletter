@@ -1,0 +1,31 @@
+import * as fs from "fs";
+import path from "path";
+import { Config } from "./Config";
+
+describe("Config", () => {
+  it("defaults EMAIL_RETENTION_DAYS to 3", () => {
+    expect(new Config().EMAIL_RETENTION_DAYS).toBe(3);
+  });
+
+  it("ships a config.json with the same retention default", () => {
+    const config = JSON.parse(
+      fs.readFileSync(path.resolve(__dirname, "../config.json"), "utf8"),
+    );
+    expect(config.EMAIL_RETENTION_DAYS).toBe(3);
+  });
+
+  it("documents the same retention default in the README", () => {
+    const readme = fs.readFileSync(
+      path.resolve(__dirname, "../../README.md"),
+      "utf8",
+    );
+    expect(readme).toMatch(/`EMAIL_RETENTION_DAYS`[^\n]*\|\s*`3`\s*\|/);
+  });
+
+  it("defaults the IMAP and fetch timeouts", () => {
+    const config = new Config();
+    expect(config.IMAP_SOCKET_TIMEOUT_MS).toBe(120000);
+    expect(config.IMAP_IDLE_SOCKET_TIMEOUT_MS).toBe(600000);
+    expect(config.EMAIL_FETCH_DEADLINE_MS).toBe(300000);
+  });
+});
