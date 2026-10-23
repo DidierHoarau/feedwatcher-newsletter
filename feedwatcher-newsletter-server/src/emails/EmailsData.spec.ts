@@ -11,10 +11,15 @@ import {
   EmailItemsBatchSave,
   EmailItemsGetExistingIds,
   EmailItemsListById,
+  EmailSendersListAll,
   EmailsDataPurgeExpired,
 } from "./EmailsData";
 import { EmailItem } from "./EmailFetcher";
 import { FeedIdentityInit } from "../feeds/FeedIdentity";
+import {
+  SanitizedBodyCacheGet,
+  SanitizedBodyCacheStats,
+} from "./SanitizedBodyCache";
 
 // Partial mock: real fs-extra everywhere, but readSync becomes a controllable
 // jest.fn so a journal read error can be simulated.
@@ -142,6 +147,110 @@ describe("EmailItemGetById", () => {
   });
 });
 
+describe("in-memory index", () => {
+  const firstId = "aaaaaaaa-1111-4111-8111-111111111111";
+  const replacementId = "bbbbbbbb-1111-4111-8111-111111111111";
+
+  it("serves a saved batch immediately from the index (write-through)", () => {
+    EmailItemsBatchSave([
+      makeItem({ messageId: "<first@example.com>" }),
+      makeItem({
+        id: "cccccccc-1111-4111-8111-111111111111",
+        messageId: "<brew@example.com>",
+        senderName: "Morning Brew",
+        senderEmail: "brew@morningbrew.com",
+      }),
+    ]);
+    expect(
+      EmailFeedsListAll().map((feed) => [feed.feedId, feed.itemCount]),
+    ).toEqual([
+      ["morningbrew", 1],
+      ["thedaily", 1],
+    ]);
+    expect(EmailItemsListById("thedaily").map((item) => item.id)).toEqual([
+      firstId,
+    ]);
+    expect(EmailItemGetById(firstId)?.messageId).toBe("<first@example.com>");
+  });
+
+  it("replaces a re-saved message: the old item id no longer resolves", () => {
+    EmailItemsBatchSave([makeItem({ messageId: "<resave@example.com>" })]);
+    EmailItemsBatchSave([
+      makeItem({
+        id: replacementId,
+        messageId: "<resave@example.com>",
+        subject: "Updated",
+      }),
+    ]);
+    expect(EmailItemsListById("thedaily").map((item) => item.id)).toEqual([
+      replacementId,
+    ]);
+    expect(EmailItemGetById(firstId)).toBeUndefined();
+    expect(EmailItemGetById(replacementId)?.subject).toBe("Updated");
+    expect(EmailItemsGetExistingIds()).toEqual(new Set(["<resave@example.com>"]));
+  });
+
+  it("serves all reads without touching the journal once warm", () => {
+    EmailItemsBatchSave([makeItem()]);
+    const movedPath = `${journalPath}.moved`;
+    fs.renameSync(journalPath, movedPath);
+    try {
+      expect(EmailFeedsListAll()).toHaveLength(1);
+      expect(EmailItemsListById("thedaily")).toHaveLength(1);
+      expect(EmailItemGetById("aaaaaaaa-1111-4111-8111-111111111111")).toBeDefined();
+      expect(EmailItemsGetExistingIds()).toEqual(new Set(["<msg-1@example.com>"]));
+      expect(EmailSendersListAll()).toEqual([
+        { senderName: "The Daily", senderEmail: "news@example.com" },
+      ]);
+    } finally {
+      fs.renameSync(movedPath, journalPath);
+    }
+  });
+
+  it("rebuilds listings after a feed-identity change without reading the journal", () => {
+    EmailItemsBatchSave([
+      makeItem(),
+      makeItem({
+        id: "cccccccc-1111-4111-8111-111111111111",
+        messageId: "<brew@example.com>",
+        senderName: "Morning Brew",
+        senderEmail: "brew@morningbrew.com",
+      }),
+    ]);
+    expect(EmailFeedsListAll().map((feed) => feed.feedId)).toEqual([
+      "morningbrew",
+      "thedaily",
+    ]);
+    const movedPath = `${journalPath}.moved`;
+    fs.renameSync(journalPath, movedPath);
+    try {
+      FeedIdentityInit({
+        ignoreList: "brew",
+        overrides: {},
+        privateUrls: false,
+        dataDir,
+      });
+      expect(EmailFeedsListAll().map((feed) => feed.feedId)).toEqual([
+        "thedaily",
+      ]);
+      expect(EmailItemsListById("morningbrew")).toHaveLength(0);
+
+      FeedIdentityInit({
+        ignoreList: "",
+        overrides: { "brew@morningbrew.com": { feedId: "brew", title: "Brew" } },
+        privateUrls: false,
+        dataDir,
+      });
+      expect(EmailFeedsListAll().map((feed) => feed.feedId)).toEqual([
+        "brew",
+        "thedaily",
+      ]);
+    } finally {
+      fs.renameSync(movedPath, journalPath);
+    }
+  });
+});
+
 describe("ignored senders in read paths", () => {
   const ignoredId = "cccccccc-1111-4111-8111-111111111111";
 
@@ -206,6 +315,7 @@ describe("journal store", () => {
   it("isolates a partial last line when appending", () => {
     // A previous failed write may leave a record without its trailing newline.
     fs.writeFileSync(journalPath, JSON.stringify(makeItem({ messageId: "<a@example.com>" })));
+    EmailsDataInit(7, dataDir);
     EmailItemsBatchSave([
       makeItem({
         id: "bbbbbbbb-1111-4111-8111-111111111111",
@@ -230,10 +340,9 @@ describe("journal store", () => {
     expect(EmailDataGetUidState()).toEqual({ uid: 0, uidvalidity: 0 });
   });
 
-  it("propagates a journal read error instead of returning partial data", () => {
+  it("propagates a journal read error at init instead of serving partial data", () => {
     fs.mkdirSync(journalPath);
-    expect(() => EmailItemsGetExistingIds()).toThrow();
-    expect(() => EmailFeedsListAll()).toThrow();
+    expect(() => EmailsDataInit(7, dataDir)).toThrow();
   });
 
   it("purges expired items and compacts the journal to one line per message", () => {
@@ -250,7 +359,52 @@ describe("journal store", () => {
     expect(EmailItemsGetExistingIds()).toEqual(new Set(["<new@example.com>"]));
   });
 
-  it("aborts the purge without touching the journal on a first-pass read error", () => {
+  it("purges expired items from feeds, permalinks and the sanitized cache", () => {
+    const expiredId = "dddddddd-1111-4111-8111-111111111111";
+    const expired = makeItem({
+      id: expiredId,
+      messageId: "<expired-cache@example.com>",
+      dateReceived: "2020-01-01T00:00:00.000Z",
+    });
+    EmailItemsBatchSave([expired, makeItem({ messageId: "<new@example.com>" })]);
+    SanitizedBodyCacheGet(expired);
+    expect(SanitizedBodyCacheStats().entries).toBe(1);
+
+    EmailsDataPurgeExpired();
+
+    expect(EmailItemsListById("thedaily").map((item) => item.messageId)).toEqual([
+      "<new@example.com>",
+    ]);
+    expect(EmailItemGetById(expiredId)).toBeUndefined();
+    expect(EmailItemsGetExistingIds()).toEqual(new Set(["<new@example.com>"]));
+    expect(SanitizedBodyCacheStats().entries).toBe(0);
+  });
+
+  it("compacts duplicate records keeping only the last record per message", () => {
+    EmailItemsBatchSave([makeItem({ messageId: "<dup@example.com>" })]);
+    EmailItemsBatchSave([
+      makeItem({
+        id: "eeeeeeee-1111-4111-8111-111111111111",
+        messageId: "<dup@example.com>",
+        subject: "Second version",
+      }),
+      makeItem({
+        id: "ffffffff-1111-4111-8111-111111111111",
+        messageId: "<victim@example.com>",
+        dateReceived: "2020-01-01T00:00:00.000Z",
+      }),
+    ]);
+    EmailsDataPurgeExpired();
+    const lines = fs
+      .readFileSync(journalPath, "utf8")
+      .split("\n")
+      .filter((l) => l.trim());
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]).subject).toBe("Second version");
+    expect(EmailItemsGetExistingIds()).toEqual(new Set(["<dup@example.com>"]));
+  });
+
+  it("leaves the index unchanged when the purge aborts", () => {
     seedLargeJournal();
     const before = fs.readFileSync(journalPath);
     readSyncMock.mockImplementation(() => {
@@ -259,6 +413,8 @@ describe("journal store", () => {
     EmailsDataPurgeExpired();
     expect(fs.readFileSync(journalPath).equals(before)).toBe(true);
     expect(fs.existsSync(`${journalPath}.tmp`)).toBe(false);
+    expect(EmailItemsGetExistingIds().has("<expired@example.com>")).toBe(true);
+    expect(EmailFeedsListAll()).toHaveLength(1);
   });
 
   it("aborts the purge without touching the journal on a second-pass read error", () => {
@@ -278,7 +434,7 @@ describe("journal store", () => {
 });
 
 // A journal larger than one 1 MB read chunk, containing one expired and many
-// live records, so the purge performs two multi-chunk passes.
+// live records, so the purge rewrites multiple chunks in a single pass.
 function seedLargeJournal(): void {
   const items: EmailItem[] = [
     makeItem({

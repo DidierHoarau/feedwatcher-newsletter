@@ -24,6 +24,7 @@ let privateUrls = false;
 let privateUrlsStrict = false;
 let tokensFilePath = "";
 let tokens: Record<string, string> = {};
+let generation = 0;
 
 export function FeedIdentityInit(options: FeedIdentityOptions): void {
   ignoreTerms = options.ignoreList
@@ -35,6 +36,7 @@ export function FeedIdentityInit(options: FeedIdentityOptions): void {
   privateUrlsStrict = options.privateUrlsStrict === true;
   tokensFilePath = path.join(options.dataDir, "feed-tokens.json");
   tokens = readTokens();
+  generation++;
   logger.info(
     `Feed identity: ${ignoreTerms.length} ignored sender term(s), ${
       Object.keys(overrides).length
@@ -42,6 +44,13 @@ export function FeedIdentityInit(options: FeedIdentityOptions): void {
       privateUrls && privateUrlsStrict ? " (strict: bare ids rejected)" : ""
     }`,
   );
+}
+
+// Monotonic configuration version: derived data (the in-memory feed index)
+// rebuilds when it changes, so a hot reload of the ignore list or overrides
+// takes effect without a write.
+export function FeedIdentityGetGeneration(): number {
+  return generation;
 }
 
 function readTokens(): Record<string, string> {

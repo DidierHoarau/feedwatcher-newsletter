@@ -4,10 +4,15 @@ import { StringDecoder } from "string_decoder";
 import { OTelLogger } from "../OTelContext";
 import {
   FeedIdentityGetFeedId,
+  FeedIdentityGetGeneration,
   FeedIdentityGetTitle,
   FeedIdentityIsSenderIgnored,
 } from "../feeds/FeedIdentity";
 import { EmailItem } from "./EmailFetcher";
+import {
+  SanitizedBodyCacheEvict,
+  SanitizedBodyCacheReset,
+} from "./SanitizedBodyCache";
 
 const logger = OTelLogger().createModuleLogger("EmailsData");
 
@@ -24,6 +29,30 @@ let retentionDays = 3;
 let journalFilePath = "";
 let legacyFilePath = "";
 
+// In-memory view of the journal, the single source of truth on disk. Built
+// once from one pass at init, then updated write-through on every durable
+// append and purge, so reads never touch the filesystem. The journal may hold
+// several records per message; the LAST one is the current state.
+let recordsByMessageId = new Map<string, EmailItem>();
+let itemById = new Map<string, EmailItem>();
+let recordCounts = new Map<string, number>();
+
+// Derived, lazily rebuilt per feed: grouping is pure in-memory work and is
+// invalidated by writes and by feed-identity configuration changes.
+interface FeedIndex {
+  identityGeneration: number;
+  itemsByFeedId: Map<string, EmailItem[]>;
+  summaries: FeedSummary[];
+  lastModifiedByFeed: Map<string, number>;
+  lastModifiedMs: number;
+}
+
+let feedIndex: FeedIndex | undefined;
+let storeMutationAtMs = 0;
+// A feed that lost items on purge gets a fresh Last-Modified even when its
+// remaining content is older than the mutation.
+let feedMutationAtMs = new Map<string, number>();
+
 // One JSON record per line, appended on each save: writes cost O(new items),
 // never O(store). This keeps ingestion memory flat even when a whole mailbox
 // backlog is re-ingested after a restart (a full read-modify-write of the
@@ -32,11 +61,9 @@ let legacyFilePath = "";
 const READ_CHUNK_BYTES = 1024 * 1024;
 
 // Walk the journal line by line without ever loading the file as one giant
-// string, invoking the handler for every valid record. Readers aggregate on
-// the fly instead of materializing the whole store in memory; the journal may
-// hold several records per message, the LAST one being the current state.
-// I/O errors propagate: a partially read journal must never be mistaken for
-// the real store (callers decide how to surface the failure).
+// string, invoking the handler for every valid record. Used at startup and by
+// the purge compaction; request paths never call it. I/O errors propagate: a
+// partially read journal must never be mistaken for the real store.
 function walkJournalLines(handleLine: (item: EmailItem) => void): void {
   if (!fse.existsSync(journalFilePath)) {
     return;
@@ -98,6 +125,16 @@ function migrateLegacyStore(): void {
   }
 }
 
+function indexRecord(item: EmailItem): void {
+  const previous = recordsByMessageId.get(item.messageId);
+  if (previous && previous.id !== item.id) {
+    itemById.delete(previous.id);
+  }
+  recordsByMessageId.set(item.messageId, item);
+  itemById.set(item.id, item);
+  recordCounts.set(item.messageId, (recordCounts.get(item.messageId) || 0) + 1);
+}
+
 export function EmailsDataInit(
   configuredRetentionDays: number,
   dataDir: string,
@@ -106,12 +143,29 @@ export function EmailsDataInit(
   journalFilePath = path.join(dataDir, "emails.jsonl");
   legacyFilePath = path.join(dataDir, "emails.json");
   migrateLegacyStore();
-  logger.info(`Email data file: ${journalFilePath}`);
+  recordsByMessageId = new Map();
+  itemById = new Map();
+  recordCounts = new Map();
+  feedIndex = undefined;
+  storeMutationAtMs = 0;
+  feedMutationAtMs = new Map();
+  SanitizedBodyCacheReset();
+  let recordCount = 0;
+  walkJournalLines((item) => {
+    indexRecord(item);
+    recordCount++;
+  });
+  // The index is the serving source of truth; an unreadable journal must fail
+  // the boot instead of silently serving empty feeds.
+  logger.info(
+    `Email data file: ${journalFilePath} (${recordCount} record(s), ${recordsByMessageId.size} message(s) indexed)`,
+  );
 }
 
 // Append the new items as journal lines. Only a durable append (fsync before
 // close) counts as success: callers must not advance the UID marker otherwise,
-// or a failed write would lose the emails permanently.
+// or a failed write would lose the emails permanently. The in-memory index is
+// updated only after the append succeeded.
 export function EmailItemsBatchSave(items: EmailItem[]): void {
   if (items.length === 0) return;
   try {
@@ -138,6 +192,19 @@ export function EmailItemsBatchSave(items: EmailItem[]): void {
     logger.error(`Failed to append to email journal`, err as Error);
     throw err;
   }
+  for (const item of items) {
+    indexRecord(item);
+  }
+  storeMutationAtMs = Date.now();
+  for (const item of items) {
+    if (!isUnknownSender(item)) {
+      feedMutationAtMs.set(
+        FeedIdentityGetFeedId(item.senderName, item.senderEmail),
+        Date.now(),
+      );
+    }
+  }
+  feedIndex = undefined;
 }
 
 export function EmailSenderGetId(senderName: string): string {
@@ -157,88 +224,102 @@ function isUnknownSender(item: EmailItem): boolean {
   );
 }
 
-// One summary per feed, grouped by the override-aware feed id, in a single
-// streaming pass over the journal.
-export function EmailFeedsListAll(): FeedSummary[] {
-  const feeds = new Map<string, FeedSummary>();
-  const seen = new Set<string>();
-  walkJournalLines((item) => {
-    // Re-saved messages appear twice in the journal; counting only the first
-    // occurrence keeps summaries stable until compaction merges them.
-    if (seen.has(item.messageId)) return;
-    seen.add(item.messageId);
-    if (isUnknownSender(item)) return;
-    if (FeedIdentityIsSenderIgnored(item.senderName, item.senderEmail)) return;
-    const feedId = FeedIdentityGetFeedId(item.senderName, item.senderEmail);
-    const existing = feeds.get(feedId);
-    if (existing) {
-      existing.itemCount++;
-      if (new Date(item.dateReceived).getTime() > new Date(existing.latestDate).getTime()) {
-        existing.latestDate = item.dateReceived;
-      }
-      return;
-    }
-    feeds.set(feedId, {
-      feedId,
-      title: FeedIdentityGetTitle(item.senderName, item.senderEmail),
-      senderName: item.senderName,
-      senderEmail: item.senderEmail,
-      itemCount: 1,
-      latestDate: item.dateReceived,
-    });
-  });
-  return Array.from(feeds.values()).sort((a, b) =>
-    a.title.localeCompare(b.title),
+function itemTimestampMs(item: EmailItem): number {
+  const created = new Date(item.dateCreated).getTime();
+  const received = new Date(item.dateReceived).getTime();
+  return Math.max(
+    Number.isFinite(created) ? created : 0,
+    Number.isFinite(received) ? received : 0,
   );
+}
+
+function buildFeedIndex(identityGeneration: number): FeedIndex {
+  const itemsByFeedId = new Map<string, EmailItem[]>();
+  const summaries: FeedSummary[] = [];
+  const lastModifiedByFeed = new Map<string, number>();
+  let lastModifiedMs = 0;
+  for (const item of recordsByMessageId.values()) {
+    const timestamp = itemTimestampMs(item);
+    if (timestamp > lastModifiedMs) {
+      lastModifiedMs = timestamp;
+    }
+    if (isUnknownSender(item)) continue;
+    if (FeedIdentityIsSenderIgnored(item.senderName, item.senderEmail)) continue;
+    const feedId = FeedIdentityGetFeedId(item.senderName, item.senderEmail);
+    const items = itemsByFeedId.get(feedId);
+    if (items) {
+      items.push(item);
+    } else {
+      itemsByFeedId.set(feedId, [item]);
+    }
+    const previous = lastModifiedByFeed.get(feedId) || 0;
+    if (timestamp > previous) {
+      lastModifiedByFeed.set(feedId, timestamp);
+    }
+  }
+  for (const [feedId, items] of itemsByFeedId) {
+    items.sort(
+      (a, b) =>
+        new Date(b.dateReceived).getTime() - new Date(a.dateReceived).getTime(),
+    );
+    const latest = items[0];
+    summaries.push({
+      feedId,
+      title: FeedIdentityGetTitle(latest.senderName, latest.senderEmail),
+      senderName: latest.senderName,
+      senderEmail: latest.senderEmail,
+      itemCount: items.length,
+      latestDate: latest.dateReceived,
+    });
+  }
+  summaries.sort((a, b) => a.title.localeCompare(b.title));
+  return {
+    identityGeneration,
+    itemsByFeedId,
+    summaries,
+    lastModifiedByFeed,
+    lastModifiedMs,
+  };
+}
+
+function ensureFeedIndex(): FeedIndex {
+  const identityGeneration = FeedIdentityGetGeneration();
+  if (feedIndex && feedIndex.identityGeneration === identityGeneration) {
+    return feedIndex;
+  }
+  const rebuilt = feedIndex !== undefined;
+  feedIndex = buildFeedIndex(identityGeneration);
+  if (rebuilt) {
+    // A configuration reload can change grouping without a write: move both
+    // validator timestamps so cached responses are revalidated.
+    const now = Date.now();
+    storeMutationAtMs = Math.max(storeMutationAtMs, now);
+    for (const feedId of feedIndex.itemsByFeedId.keys()) {
+      feedMutationAtMs.set(feedId, now);
+    }
+  }
+  return feedIndex;
+}
+
+// One summary per feed, grouped by the override-aware feed id.
+export function EmailFeedsListAll(): FeedSummary[] {
+  return ensureFeedIndex().summaries.slice();
 }
 
 export function EmailItemsListById(id: string): EmailItem[] {
-  const items = new Map<string, EmailItem>();
-  walkJournalLines((item) => {
-    if (
-      !isUnknownSender(item) &&
-      !FeedIdentityIsSenderIgnored(item.senderName, item.senderEmail) &&
-      FeedIdentityGetFeedId(item.senderName, item.senderEmail) === id
-    ) {
-      // Keyed by messageId: a re-saved message replaces its earlier record.
-      items.set(item.messageId, item);
-    }
-  });
-  return Array.from(items.values()).sort(
-    (a, b) =>
-      new Date(b.dateReceived).getTime() - new Date(a.dateReceived).getTime(),
-  );
+  const items = ensureFeedIndex().itemsByFeedId.get(id);
+  return items ? items.slice() : [];
 }
 
 // Look up one email by its item id (uuid) for the /view/:emailId pages.
-// Mirrors the last-wins store: a re-saved message supersedes the permalink of
-// its earlier record.
+// Item ids only resolve for the current record of a message: a re-saved
+// message supersedes the permalink of its earlier record.
 export function EmailItemGetById(id: string): EmailItem | undefined {
-  let found: EmailItem | undefined;
-  let foundIndex = -1;
-  let lastSameMessageIndex = -1;
-  let recordIndex = 0;
-  walkJournalLines((item) => {
-    const idx = recordIndex++;
-    if (found && item.messageId === found.messageId) {
-      lastSameMessageIndex = idx;
-      if (item.id === id) {
-        found = item;
-        foundIndex = idx;
-      }
-    } else if (item.id === id) {
-      found = item;
-      foundIndex = idx;
-      lastSameMessageIndex = idx;
-    }
-  });
-  if (
-    !found ||
-    FeedIdentityIsSenderIgnored(found.senderName, found.senderEmail)
-  ) {
+  const item = itemById.get(id);
+  if (!item || FeedIdentityIsSenderIgnored(item.senderName, item.senderEmail)) {
     return undefined;
   }
-  return lastSameMessageIndex > foundIndex ? undefined : found;
+  return item;
 }
 
 export function EmailSendersListAll(): {
@@ -246,47 +327,87 @@ export function EmailSendersListAll(): {
   senderEmail: string;
 }[] {
   const seen = new Map<string, string>();
-  walkJournalLines((e) => {
-    if (!seen.has(e.senderName)) {
-      seen.set(e.senderName, e.senderEmail);
+  for (const item of recordsByMessageId.values()) {
+    if (!seen.has(item.senderName)) {
+      seen.set(item.senderName, item.senderEmail);
     }
-  });
+  }
   return Array.from(seen.entries())
     .map(([senderName, senderEmail]) => ({ senderName, senderEmail }))
     .sort((a, b) => a.senderName.localeCompare(b.senderName));
 }
 
-// Compaction: keep only the last record of each non-expired message, in two
-// streaming passes with O(message-ids) memory — the store is never
-// materialized. Any read or write error aborts the purge without touching the
-// journal: rewriting it from a partial read would truncate data.
+function lastModifiedOf(contentTimestampMs: number, mutationAtMs: number): number {
+  return Math.min(Date.now(), Math.max(contentTimestampMs, mutationAtMs));
+}
+
+// Strong validator time for the whole store: latest content timestamp combined
+// with the last successful mutation, never in the future.
+export function EmailsDataGetLastModified(): number {
+  if (recordsByMessageId.size === 0) {
+    return 0;
+  }
+  return lastModifiedOf(ensureFeedIndex().lastModifiedMs, storeMutationAtMs);
+}
+
+export function EmailsDataGetFeedLastModified(feedId: string): number {
+  const index = ensureFeedIndex();
+  const items = index.itemsByFeedId.get(feedId);
+  if (!items || items.length === 0) {
+    return 0;
+  }
+  return lastModifiedOf(
+    index.lastModifiedByFeed.get(feedId) || 0,
+    feedMutationAtMs.get(feedId) || 0,
+  );
+}
+
+// Compaction: keep only the last record of each non-expired message, in one
+// streaming pass — expired message ids are computed from the in-memory index,
+// so the journal is read only to write the compacted copy. Any read or write
+// error aborts the purge without touching the journal: rewriting it from a
+// partial read would truncate data.
 export function EmailsDataPurgeExpired(): void {
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
-  const last = new Map<string, { index: number; expired: boolean }>();
-  let recordIndex = 0;
+  const expired = new Set<string>();
+  for (const [messageId, item] of recordsByMessageId) {
+    if (new Date(item.dateReceived).getTime() < cutoff) {
+      expired.add(messageId);
+    }
+  }
+  if (expired.size === 0) {
+    return;
+  }
+  const expiredItemIds: string[] = [];
+  const affectedFeedIds = new Set<string>();
+  for (const messageId of expired) {
+    const item = recordsByMessageId.get(messageId);
+    if (!item) continue;
+    expiredItemIds.push(item.id);
+    if (!isUnknownSender(item)) {
+      affectedFeedIds.add(
+        FeedIdentityGetFeedId(item.senderName, item.senderEmail),
+      );
+    }
+  }
   let tmpPath = "";
   try {
-    walkJournalLines((item) => {
-      last.set(item.messageId, {
-        index: recordIndex++,
-        expired: new Date(item.dateReceived).getTime() < cutoff,
-      });
-    });
-    const expiredCount = Array.from(last.values()).filter((e) => e.expired).length;
-    if (expiredCount === 0) {
-      return;
-    }
     tmpPath = `${journalFilePath}.tmp`;
     fse.ensureDirSync(path.dirname(journalFilePath));
     const out = fse.openSync(tmpPath, "w");
     try {
-      recordIndex = 0;
+      const seenOrdinals = new Map<string, number>();
       walkJournalLines((item) => {
-        const state = last.get(item.messageId);
-        if (state && state.index === recordIndex && !state.expired) {
-          fse.writeSync(out, JSON.stringify(item) + "\n");
+        const ordinal = (seenOrdinals.get(item.messageId) || 0) + 1;
+        seenOrdinals.set(item.messageId, ordinal);
+        const knownCount = recordCounts.get(item.messageId);
+        // Only the last record of a message is written; records of unknown
+        // messages (journal edited outside the process) are kept defensively.
+        if (knownCount === undefined || ordinal === knownCount) {
+          if (!expired.has(item.messageId)) {
+            fse.writeSync(out, JSON.stringify(item) + "\n");
+          }
         }
-        recordIndex++;
       });
       fse.fsyncSync(out);
     } finally {
@@ -294,8 +415,22 @@ export function EmailsDataPurgeExpired(): void {
     }
     fse.renameSync(tmpPath, journalFilePath);
     tmpPath = "";
+    for (const messageId of expired) {
+      recordsByMessageId.delete(messageId);
+      recordCounts.delete(messageId);
+    }
+    for (const id of expiredItemIds) {
+      itemById.delete(id);
+    }
+    const now = Date.now();
+    storeMutationAtMs = now;
+    for (const feedId of affectedFeedIds) {
+      feedMutationAtMs.set(feedId, now);
+    }
+    feedIndex = undefined;
+    SanitizedBodyCacheEvict(expiredItemIds);
     logger.info(
-      `Purged ${expiredCount} expired email(s) older than ${retentionDays} day(s)`,
+      `Purged ${expired.size} expired email(s) older than ${retentionDays} day(s)`,
     );
   } catch (err) {
     if (tmpPath) {
@@ -392,10 +527,8 @@ export function EmailsDataSetRetentionDays(days: number): void {
   logger.info(`Email retention configured to ${retentionDays} day(s)`);
 }
 
-// Read existing message-IDs once so callers can deduplicate without
-// re-reading the journal for every email.
+// Existing message-IDs, from the index: the fetch deduplication check must not
+// re-read the journal on every run.
 export function EmailItemsGetExistingIds(): Set<string> {
-  const ids = new Set<string>();
-  walkJournalLines((item) => ids.add(item.messageId));
-  return ids;
+  return new Set(recordsByMessageId.keys());
 }

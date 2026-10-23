@@ -1,6 +1,6 @@
 {
   "name": "feedwatcher-newsletter-server",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "author": "",
   "license": "MIT",
   "scripts": {
@@ -15,6 +15,7 @@
   "dependencies": {
     "@devopsplaybook.io/common-utils": "^1.15.1",
     "@devopsplaybook.io/otel-utils-fastify": "^1.4.1",
+    "@fastify/compress": "^9.2.2",
     "@fastify/cors": "^11.3.1",
     "fastify": "^5.12.7",
     "fs-extra": "^11.4.1",

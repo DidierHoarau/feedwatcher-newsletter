@@ -8,6 +8,7 @@ import { EmailsDataInit, EmailItemsBatchSave } from "./EmailsData";
 import { EmailItem } from "./EmailFetcher";
 import { FeedIdentityInit } from "../feeds/FeedIdentity";
 import { RssFeedGeneratorBuildFeedById } from "./RssFeedGenerator";
+import { SanitizedBodyCacheStats } from "./SanitizedBodyCache";
 
 function makeItem(overrides: Partial<EmailItem> = {}): EmailItem {
   return {
@@ -112,6 +113,33 @@ describe("RssFeedGeneratorBuildFeedById", () => {
       false,
     ) as string;
     expect(xml).toContain("tracker.example/keep");
+  });
+
+  it("builds byte-identical documents for unchanged data", () => {
+    EmailItemsBatchSave([
+      makeItem({
+        id: "44444444-4444-4444-8444-444444444444",
+        messageId: "<deterministic@example.com>",
+      }),
+    ]);
+    const span = OTelTracer().startSpan("test");
+    const first = RssFeedGeneratorBuildFeedById(
+      span,
+      "thedaily",
+      "https://svc.example.com",
+    ) as string;
+    const cachedEntries = SanitizedBodyCacheStats().entries;
+    const second = RssFeedGeneratorBuildFeedById(
+      OTelTracer().startSpan("test"),
+      "thedaily",
+      "https://svc.example.com",
+    ) as string;
+    expect(second).toBe(first);
+    expect(first).toMatch(
+      /<lastBuildDate>[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT<\/lastBuildDate>/,
+    );
+    // The second build reuses the sanitized bodies instead of caching anew.
+    expect(SanitizedBodyCacheStats().entries).toBe(cachedEntries);
   });
 
   it("returns undefined for an unknown feed id and creates no token", () => {

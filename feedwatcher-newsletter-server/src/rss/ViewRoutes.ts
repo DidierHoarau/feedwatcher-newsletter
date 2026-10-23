@@ -2,6 +2,7 @@ import { FastifyInstance } from "fastify";
 import { Config } from "../Config";
 import { OTelLogger, OTelRequestSpan } from "../OTelContext";
 import { EmailItemGetById } from "../emails/EmailsData";
+import { SanitizedBodyCacheGet } from "../emails/SanitizedBodyCache";
 import { renderViewPage } from "./HtmlPages";
 
 const logger = OTelLogger().createModuleLogger("ViewRoutes");
@@ -24,9 +25,11 @@ export class ViewRoutes {
           return reply.send({ error: "Email not found" });
         }
         reply.header("Content-Type", "text/html; charset=utf-8");
-        return reply.send(
-          renderViewPage(email, this.config.EMAIL_STRIP_TRACKING_PIXELS),
+        const sanitized = SanitizedBodyCacheGet(
+          email,
+          this.config.EMAIL_STRIP_TRACKING_PIXELS,
         );
+        return reply.send(renderViewPage(email, sanitized.html));
       },
     );
   };

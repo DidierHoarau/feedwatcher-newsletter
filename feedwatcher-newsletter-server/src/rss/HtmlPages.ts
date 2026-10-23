@@ -1,5 +1,4 @@
 import { EmailItem } from "../emails/EmailFetcher";
-import { HtmlSanitizerSanitize } from "../emails/HtmlSanitizer";
 
 interface FeedForIndex {
   feedUrl: string;
@@ -158,7 +157,7 @@ export function renderFeedsIndexPage(feeds: FeedForIndex[]): string {
 
 export function renderViewPage(
   email: EmailItem,
-  stripTrackingPixels = true,
+  sanitizedBody: string,
 ): string {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -175,10 +174,7 @@ export function renderViewPage(
   <p class="email-meta">${escapeHtml(email.senderName)} &lt;${escapeHtml(
     email.senderEmail,
   )}&gt; · ${escapeHtml(new Date(email.dateReceived).toUTCString())}</p>
-  <div class="email-body">${HtmlSanitizerSanitize(
-    email.body,
-    stripTrackingPixels,
-  )}</div>
+  <div class="email-body">${sanitizedBody}</div>
 </main>
 </body>
 </html>

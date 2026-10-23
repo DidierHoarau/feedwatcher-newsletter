@@ -188,6 +188,14 @@ When authentication is enabled (non-empty `AUTH_PASSWORD`), every endpoint excep
 - **Timeouts.** Fetch connections use `IMAP_SOCKET_TIMEOUT_MS`, the IDLE connection uses `IMAP_IDLE_SOCKET_TIMEOUT_MS`, and every fetch run has an overall `EMAIL_FETCH_DEADLINE_MS` deadline. A connection that ends or closes mid-fetch settles the run instead of hanging it.
 - **Safe purge.** The hourly purge aborts without touching the journal when it cannot read it completely, and rewrites through an fsync'd temporary file followed by a rename, so the journal is never truncated.
 
+## Performance and HTTP caching
+
+- **In-memory index.** `emails.jsonl` remains the single source of truth, but it is parsed once at startup into an in-memory index (current record per message id, item id → record, journal record counts). Appends and purges update the index write-through and feed grouping is derived lazily in memory, so `/rss/`, `/rss/opml` and `/rss/:id` never read the journal during a request. An unreadable journal fails the startup instead of silently serving empty feeds. Memory follows the journal size: a ~96 MB journal indexes to roughly 340 MB RSS after startup.
+- **Sanitized-body cache.** Sanitized HTML and its plain-text summary are cached per item id and sanitizer configuration in a bounded LRU of 32 MiB (accounted as raw UTF-16 size, evicted on purge and reset at startup). Feed builds and `/view/:emailId` share the cache, so a body is sanitized once per configuration instead of on every poll.
+- **Conditional requests.** `/rss/` (JSON and HTML), `/rss/opml` and `/rss/:id` return a strong `ETag` (content hash) and `Last-Modified`, both invalidated by append, purge and feed-identity changes, and answer `If-None-Match`/`If-Modified-Since` with `304 Not Modified`. `/rss/` also sends `Vary: Accept`.
+- **Compression.** gzip, brotli and deflate are negotiated for `/rss/*` and the HTML pages; responses below 1 KiB stay identity-encoded, and a request without `Accept-Encoding` gets the identity representation (`Vary: Accept-Encoding`).
+- **Benchmark.** `feedwatcher-newsletter-server/docs/bench/feed-serving-benchmark.ts` regenerates a synthetic journal (default: 1,000 records / ~96 MB / 50 feeds) and reports per-endpoint cold and warm latency plus RSS. Run it from `feedwatcher-newsletter-server/` with `npx tsx docs/bench/feed-serving-benchmark.ts --out after.json`; the measured before/after is in `docs/bench/README.md`.
+
 ## Configuration reload
 
 `config.json` is watched and reloaded without a restart. These values are applied immediately: `EMAIL_FETCH_CRON` (the job is rescheduled), `EMAIL_RETENTION_DAYS`, `EMAIL_FETCH_IDLE` (the IDLE connection is started or stopped), `SENDER_IGNORE_LIST`, `FEED_OVERRIDES`, `FEED_PRIVATE_URLS`, `FEED_PRIVATE_URLS_STRICT`, `AUTH_USERNAME`, `AUTH_PASSWORD`, `PUBLIC_URL` and the `EMAIL_FETCH_*` knobs. These are **restart-only** (a warning is logged when they change): `IMAP_HOST`, `IMAP_PORT`, `IMAP_TLS`, `IMAP_USER`, `IMAP_PASSWORD`, `IMAP_MAILBOX`, `DATA_DIR`, `API_PORT`, `TRUST_PROXY` and the OpenTelemetry exporter settings. An unreadable or invalid `config.json` is ignored and the last valid configuration stays active.
@@ -216,6 +224,8 @@ When authentication is enabled (`AUTH_PASSWORD` non-empty), every endpoint below
 | `GET`  | `/view/:emailId`  | Readable web view of one email (the feed items' permalink target); `404` for unknown or ignored emails |
 
 The sender ID is derived from the sender name by lowercasing it and removing all non-alphanumeric characters (e.g., `"The Daily Newsletter"` → `thedailynewsletter`). It can be overridden per sender with `FEED_OVERRIDES`.
+
+The feed list, the OPML export and every feed answer conditional requests: they carry an `ETag` and `Last-Modified` and return `304 Not Modified` for `If-None-Match`/`If-Modified-Since`, so pollers do not re-download unchanged feeds. Feed payloads and the HTML pages are compressed with gzip/brotli when the client advertises support; `Accept-Encoding`-less requests get the identity body. See [Performance and HTTP caching](#performance-and-http-caching).
 
 When `FEED_PRIVATE_URLS` is enabled (default), the list and the OPML export advertise feed URLs of the form `<feedId>.<randomToken>` (e.g. `thedailynewsletter.9f86d081884c7d65`), persisted in `DATA_DIR/feed-tokens.json`. Tokens are created only for existing feeds, are pruned at startup when their feed disappears, and an invalid token never creates an entry. Bare feed ids keep working so existing reader subscriptions are unaffected, unless `FEED_PRIVATE_URLS_STRICT=true` is set — then bare ids return `404` and only tokenized URLs are served.
 
