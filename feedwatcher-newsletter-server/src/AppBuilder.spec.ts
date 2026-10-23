@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import path from "path";
@@ -719,6 +720,98 @@ describe("journal independence at the route level", () => {
       expect(fs.existsSync(journalPath)).toBe(false);
     } finally {
       fs.renameSync(movedPath, journalPath);
+    }
+  });
+});
+
+describe("security headers", () => {
+  function scriptHash(body: string): string {
+    const match = body.match(/<script>([\s\S]*?)<\/script>/);
+    expect(match).not.toBeNull();
+    return createHash("sha256").update(match![1]).digest("base64");
+  }
+
+  it("serves the HTML index with a CSP matching its inline script", async () => {
+    const response = await build(makeConfig()).inject({
+      method: "GET",
+      url: "/rss/",
+      headers: { accept: "text/html" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("text/html");
+    expect(response.headers["content-security-policy"]).toBe(
+      [
+        "default-src 'self'",
+        `script-src 'self' 'sha256-${scriptHash(response.body)}'`,
+        "style-src 'self' 'unsafe-inline'",
+        "img-src http: https: data:",
+        "connect-src 'self'",
+        "font-src 'self'",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+      ].join("; "),
+    );
+    expect(response.headers["x-content-type-options"]).toBe("nosniff");
+    expect(response.headers["referrer-policy"]).toBe("no-referrer");
+    expect(response.headers["x-frame-options"]).toBe("DENY");
+    expect(response.headers["permissions-policy"]).toBe(
+      "camera=(), microphone=(), geolocation=()",
+    );
+  });
+
+  it("serves the email view with the same CSP", async () => {
+    const response = await build(makeConfig()).inject({
+      method: "GET",
+      url: `/view/${DAILY_ID}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-security-policy"]).toContain(
+      "default-src 'self'",
+    );
+    expect(response.headers["content-security-policy"]).toContain(
+      "frame-ancestors 'none'",
+    );
+    expect(response.headers["x-content-type-options"]).toBe("nosniff");
+  });
+
+  it("keeps the CSP and ETag stable across requests", async () => {
+    const fastify = build(makeConfig());
+    const first = await fastify.inject({
+      method: "GET",
+      url: "/rss/",
+      headers: { accept: "text/html" },
+    });
+    const second = await fastify.inject({
+      method: "GET",
+      url: "/rss/",
+      headers: { accept: "text/html" },
+    });
+
+    expect(second.headers["content-security-policy"]).toBe(
+      first.headers["content-security-policy"],
+    );
+    expect(second.headers.etag).toBe(first.headers.etag);
+  });
+
+  it("adds the baseline headers but no CSP to feed, JSON, OPML and status responses", async () => {
+    const fastify = build(makeConfig());
+    const urls = [
+      "/rss/",
+      "/rss/opml",
+      `/rss/${FeedIdentityGetFeedUrlId("thedaily")}`,
+      "/api/status",
+    ];
+    for (const url of urls) {
+      const response = await fastify.inject({ method: "GET", url });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["x-content-type-options"]).toBe("nosniff");
+      expect(response.headers["referrer-policy"]).toBe("no-referrer");
+      expect(response.headers["x-frame-options"]).toBe("DENY");
+      expect(response.headers["content-security-policy"]).toBeUndefined();
     }
   });
 });

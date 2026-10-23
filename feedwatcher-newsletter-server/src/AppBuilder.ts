@@ -4,11 +4,16 @@ import { StandardTracerFastifyRegisterHooks } from "@devopsplaybook.io/otel-util
 import { Config } from "./Config";
 import { OTelLogger, OTelTracer } from "./OTelContext";
 import { RssRoutes } from "./rss/RssRoutes";
+import { SecurityHeadersRegisterHook } from "./rss/SecurityHeaders";
 import { ViewRoutes } from "./rss/ViewRoutes";
 import { AccessControlRegisterHook } from "./security/AccessControl";
 
 export function buildApp(config: Config): FastifyInstance {
   const fastify = Fastify({ trustProxy: config.TRUST_PROXY });
+
+  // Security headers are registered before the routes so every response,
+  // including /api/status, carries them.
+  SecurityHeadersRegisterHook(fastify);
 
   // gzip/brotli negotiation for feed payloads and HTML pages. The 1 KiB
   // threshold keeps tiny payloads (status, errors) identity-encoded, and a

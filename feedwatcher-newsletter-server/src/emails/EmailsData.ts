@@ -207,13 +207,6 @@ export function EmailItemsBatchSave(items: EmailItem[]): void {
   feedIndex = undefined;
 }
 
-export function EmailSenderGetId(senderName: string): string {
-  return senderName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "")
-    .slice(0, 64);
-}
-
 // Sender-name-only grouping breaks down for senders without a From header;
 // such emails are never listed as feeds.
 function isUnknownSender(item: EmailItem): boolean {
