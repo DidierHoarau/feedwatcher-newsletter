@@ -39,12 +39,26 @@ export class Config extends ConfigBase {
   // with the cron schedule kept as fallback
   public EMAIL_FETCH_IDLE = true;
 
-  // Content hygiene: strip 1x1 tracking-pixel images from email bodies
+  // Content hygiene: strip tracking-pixel images (1x1, or a single known
+  // dimension <= 1) from email bodies
   public EMAIL_STRIP_TRACKING_PIXELS = true;
 
   // Privacy: advertise and emit unguessable feed URLs (<feedId>.<token>);
-  // bare feed ids keep working for existing subscriptions
+  // bare feed ids keep working unless strict mode is enabled
   public FEED_PRIVATE_URLS = true;
+
+  // Privacy: reject bare feed ids when FEED_PRIVATE_URLS is enabled. Opt-in
+  // because bare-id subscriptions stop working.
+  public FEED_PRIVATE_URLS_STRICT = false;
+
+  // Access control: optional HTTP Basic auth protecting /, /rss/* and /view/*.
+  // Enabled when AUTH_PASSWORD is non-empty; disabled by default.
+  public AUTH_USERNAME = "feedwatcher";
+  public AUTH_PASSWORD = "";
+
+  // Proxy: trust X-Forwarded-Proto/Host from a reverse proxy when deriving
+  // request-based feed URLs. Restart-only. Default false (headers ignored).
+  public TRUST_PROXY = false;
 
   // Feed control: comma-separated sender name/email fragments whose emails
   // are never ingested or listed as feeds
@@ -78,6 +92,10 @@ export class Config extends ConfigBase {
     this.addConfigField({ field: "EMAIL_FETCH_IDLE" });
     this.addConfigField({ field: "EMAIL_STRIP_TRACKING_PIXELS" });
     this.addConfigField({ field: "FEED_PRIVATE_URLS" });
+    this.addConfigField({ field: "FEED_PRIVATE_URLS_STRICT" });
+    this.addConfigField({ field: "AUTH_USERNAME" });
+    this.addConfigField({ field: "AUTH_PASSWORD", sensitive: true });
+    this.addConfigField({ field: "TRUST_PROXY" });
     this.addConfigField({ field: "SENDER_IGNORE_LIST" });
     this.addConfigField({ field: "FEED_OVERRIDES" });
     this.addConfigField({ field: "PUBLIC_URL" });

@@ -17,8 +17,12 @@ import { renderFeedsIndexPage } from "./HtmlPages";
 const logger = OTelLogger().createModuleLogger("RssRoutes");
 
 // Feed URLs use PUBLIC_URL when configured, otherwise the incoming request.
+// request.host includes the port; request.protocol/request.host honour
+// X-Forwarded-* only when Fastify trustProxy (TRUST_PROXY) is enabled. Without
+// PUBLIC_URL the Host header is client-controlled (link poisoning).
 function getBaseUrl(config: Config, request: FastifyRequest): string {
-  return config.PUBLIC_URL || `${request.protocol}://${request.hostname}`;
+  const configured = (config.PUBLIC_URL || "").trim().replace(/\/+$/, "");
+  return configured || `${request.protocol}://${request.host}`;
 }
 
 interface FeedListEntry extends FeedSummary {
@@ -90,7 +94,7 @@ export class RssRoutes {
 
     // Get RSS feed for a specific sender by id. Ids may carry the private
     // token (<feedId>.<token>); bare feed ids keep working for existing
-    // subscriptions.
+    // subscriptions unless strict private mode is enabled.
     fastify.get<{ Params: { id: string } }>("/:id", async (request, reply) => {
       const span = OTelRequestSpan(request) as Span;
       const { id } = request.params;
@@ -107,7 +111,13 @@ export class RssRoutes {
         span,
         resolved.feedId,
         baseUrl,
+        this.config.EMAIL_STRIP_TRACKING_PIXELS,
       );
+      if (xml === undefined) {
+        logger.info(`Unknown feed id: ${resolved.feedId}`, span);
+        reply.code(404);
+        return reply.send({ error: "Feed not found" });
+      }
 
       reply.header("Content-Type", "application/rss+xml; charset=utf-8");
       return reply.send(xml);

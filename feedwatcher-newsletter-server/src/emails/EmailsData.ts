@@ -197,6 +197,7 @@ export function EmailItemsListById(id: string): EmailItem[] {
   walkJournalLines((item) => {
     if (
       !isUnknownSender(item) &&
+      !FeedIdentityIsSenderIgnored(item.senderName, item.senderEmail) &&
       FeedIdentityGetFeedId(item.senderName, item.senderEmail) === id
     ) {
       // Keyed by messageId: a re-saved message replaces its earlier record.
@@ -231,6 +232,12 @@ export function EmailItemGetById(id: string): EmailItem | undefined {
       lastSameMessageIndex = idx;
     }
   });
+  if (
+    !found ||
+    FeedIdentityIsSenderIgnored(found.senderName, found.senderEmail)
+  ) {
+    return undefined;
+  }
   return lastSameMessageIndex > foundIndex ? undefined : found;
 }
 

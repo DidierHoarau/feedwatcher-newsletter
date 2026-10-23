@@ -28,4 +28,12 @@ describe("Config", () => {
     expect(config.IMAP_IDLE_SOCKET_TIMEOUT_MS).toBe(600000);
     expect(config.EMAIL_FETCH_DEADLINE_MS).toBe(300000);
   });
+
+  it("disables authentication, strict private URLs and proxy trust by default", () => {
+    const config = new Config();
+    expect(config.AUTH_USERNAME).toBe("feedwatcher");
+    expect(config.AUTH_PASSWORD).toBe("");
+    expect(config.FEED_PRIVATE_URLS_STRICT).toBe(false);
+    expect(config.TRUST_PROXY).toBe(false);
+  });
 });

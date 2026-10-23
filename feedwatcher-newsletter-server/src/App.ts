@@ -1,7 +1,6 @@
 import { StandardMeter, StandardTracer } from "@devopsplaybook.io/otel-utils";
-import { StandardTracerFastifyRegisterHooks } from "@devopsplaybook.io/otel-utils-fastify";
-import Fastify from "fastify";
 import * as fse from "fs-extra";
+import { buildApp } from "./AppBuilder";
 import { Config } from "./Config";
 import {
   OTelLogger,
@@ -10,8 +9,6 @@ import {
   OTelTracer,
 } from "./OTelContext";
 import { SchedulerInit, SchedulerReload } from "./Scheduler";
-import { RssRoutes } from "./rss/RssRoutes";
-import { ViewRoutes } from "./rss/ViewRoutes";
 
 const logger = OTelLogger().createModuleLogger("app");
 
@@ -61,27 +58,7 @@ Promise.resolve().then(async () => {
 
   // API
 
-  const fastify = Fastify({});
-
-  StandardTracerFastifyRegisterHooks(fastify, OTelTracer(), OTelLogger(), {
-    ignoreList: ["GET-/api/status"],
-  });
-
-  fastify.get("/api/status", async () => {
-    return { started: true };
-  });
-
-  // Human entry point: the feeds index page
-  fastify.get("/", async (_request, reply) => {
-    return reply.redirect("/rss/");
-  });
-
-  // Readable permalink pages for individual emails
-  fastify.register(new ViewRoutes().getRoutes);
-
-  fastify.register(new RssRoutes(config).getRoutes, {
-    prefix: "/rss",
-  });
+  const fastify = buildApp(config);
 
   fastify.listen({ port: config.API_PORT, host: "0.0.0.0" }, (err) => {
     if (err) {

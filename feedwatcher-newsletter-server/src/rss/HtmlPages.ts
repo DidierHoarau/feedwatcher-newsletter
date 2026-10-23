@@ -156,7 +156,10 @@ export function renderFeedsIndexPage(feeds: FeedForIndex[]): string {
 `;
 }
 
-export function renderViewPage(email: EmailItem): string {
+export function renderViewPage(
+  email: EmailItem,
+  stripTrackingPixels = true,
+): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -172,7 +175,10 @@ export function renderViewPage(email: EmailItem): string {
   <p class="email-meta">${escapeHtml(email.senderName)} &lt;${escapeHtml(
     email.senderEmail,
   )}&gt; · ${escapeHtml(new Date(email.dateReceived).toUTCString())}</p>
-  <div class="email-body">${HtmlSanitizerSanitize(email.body)}</div>
+  <div class="email-body">${HtmlSanitizerSanitize(
+    email.body,
+    stripTrackingPixels,
+  )}</div>
 </main>
 </body>
 </html>

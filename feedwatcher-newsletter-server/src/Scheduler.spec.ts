@@ -7,9 +7,9 @@ import { IdleWatcherStart } from "./emails/IdleWatcher";
 import {
   EmailsDataPurgeExpired,
   EmailsDataSetRetentionDays,
-  EmailSendersListAll,
+  EmailFeedsListAll,
 } from "./emails/EmailsData";
-import { FeedIdentityInit } from "./feeds/FeedIdentity";
+import { FeedIdentityInit, FeedIdentityPruneTokens } from "./feeds/FeedIdentity";
 import { TimeoutWait } from "./utils-std-ts/Timeout";
 
 jest.mock("./emails/EmailFetcher", () => ({
@@ -22,12 +22,12 @@ jest.mock("./emails/EmailsData", () => ({
   EmailsDataInit: jest.fn(),
   EmailsDataPurgeExpired: jest.fn(),
   EmailsDataSetRetentionDays: jest.fn(),
-  EmailSendersListAll: jest.fn(),
+  EmailFeedsListAll: jest.fn(),
 }));
 jest.mock("./feeds/FeedIdentity", () => ({
   FeedIdentityInit: jest.fn(),
-  FeedIdentityGetFeedId: jest.fn(),
   FeedIdentityGetFeedUrlId: jest.fn(),
+  FeedIdentityPruneTokens: jest.fn(),
 }));
 jest.mock("node-schedule", () => ({
   scheduleJob: jest.fn(),
@@ -49,7 +49,8 @@ jest.mock("./OTelContext", () => {
 const fetchMock = EmailFetcherFetchEmails as unknown as jest.Mock;
 const idleStartMock = IdleWatcherStart as unknown as jest.Mock;
 const scheduleJobMock = schedule.scheduleJob as unknown as jest.Mock;
-const sendersMock = EmailSendersListAll as unknown as jest.Mock;
+const feedsMock = EmailFeedsListAll as unknown as jest.Mock;
+const pruneTokensMock = FeedIdentityPruneTokens as unknown as jest.Mock;
 const timeoutMock = TimeoutWait as unknown as jest.Mock;
 const mockLogger = jest.requireMock("./OTelContext").__mockLogger;
 
@@ -93,10 +94,9 @@ async function flushAsync(): Promise<void> {
 beforeEach(() => {
   jest.resetAllMocks();
   fetchMock.mockResolvedValue(undefined);
-  sendersMock.mockReturnValue([]);
+  feedsMock.mockReturnValue([]);
   timeoutMock.mockResolvedValue(undefined);
   scheduleJobMock.mockImplementation(() => ({ cancel: jest.fn() }));
-  (jest.requireMock("./feeds/FeedIdentity").FeedIdentityGetFeedId as jest.Mock).mockReturnValue("feed");
   (jest.requireMock("./feeds/FeedIdentity").FeedIdentityGetFeedUrlId as jest.Mock).mockReturnValue("feed");
 });
 
@@ -160,6 +160,23 @@ describe("SchedulerInit", () => {
     expect(timeoutMock).toHaveBeenCalledTimes(2);
     expect(timeoutMock).toHaveBeenCalledWith(1234);
   });
+
+  it("prunes feed tokens for the feeds present at startup", async () => {
+    feedsMock.mockReturnValue([
+      {
+        feedId: "daily",
+        title: "The Daily",
+        senderName: "The Daily",
+        senderEmail: "news@example.com",
+        itemCount: 1,
+        latestDate: "2026-10-15T08:00:00.000Z",
+      },
+    ]);
+
+    await SchedulerInit(makeSpan(), makeConfig());
+
+    expect(pruneTokensMock).toHaveBeenCalledWith(["daily"]);
+  });
 });
 
 describe("SchedulerReload", () => {
@@ -175,6 +192,7 @@ describe("SchedulerReload", () => {
         EMAIL_RETENTION_DAYS: 5,
         EMAIL_FETCH_CRON: "*/5 * * * *",
         SENDER_IGNORE_LIST: "billing",
+        FEED_PRIVATE_URLS_STRICT: true,
       }),
     );
 
@@ -188,7 +206,10 @@ describe("SchedulerReload", () => {
     expect(idleStartMock).toHaveBeenCalledTimes(2);
     expect(FeedIdentityInit).toHaveBeenCalledTimes(2);
     expect(FeedIdentityInit).toHaveBeenLastCalledWith(
-      expect.objectContaining({ ignoreList: "billing" }),
+      expect.objectContaining({
+        ignoreList: "billing",
+        privateUrlsStrict: true,
+      }),
     );
   });
 
