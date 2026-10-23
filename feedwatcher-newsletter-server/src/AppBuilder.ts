@@ -1,4 +1,5 @@
 import Fastify, { FastifyInstance } from "fastify";
+import compress from "@fastify/compress";
 import { StandardTracerFastifyRegisterHooks } from "@devopsplaybook.io/otel-utils-fastify";
 import { Config } from "./Config";
 import { OTelLogger, OTelTracer } from "./OTelContext";
@@ -8,6 +9,11 @@ import { AccessControlRegisterHook } from "./security/AccessControl";
 
 export function buildApp(config: Config): FastifyInstance {
   const fastify = Fastify({ trustProxy: config.TRUST_PROXY });
+
+  // gzip/brotli negotiation for feed payloads and HTML pages. The 1 KiB
+  // threshold keeps tiny payloads (status, errors) identity-encoded, and a
+  // request without Accept-Encoding gets the identity representation.
+  fastify.register(compress, { threshold: 1024 });
 
   StandardTracerFastifyRegisterHooks(fastify, OTelTracer(), OTelLogger(), {
     ignoreList: ["GET-/api/status"],

@@ -8,11 +8,13 @@ function xmlEscape(value: string): string {
 }
 
 // OPML 2.0 document listing one outline per feed, compatible with the OPML
-// import of FeedWatcher and most RSS readers.
+// import of FeedWatcher and most RSS readers. The caller supplies the
+// creation date so the document (and its ETag) is stable between requests.
 export function OpmlGeneratorBuild(
   title: string,
   siteUrl: string,
   feeds: { title: string; feedUrl: string }[],
+  dateCreated: Date,
 ): string {
   const outlines = feeds
     .map(
@@ -26,7 +28,7 @@ export function OpmlGeneratorBuild(
 <opml version="2.0">
   <head>
     <title>${xmlEscape(title)}</title>
-    <dateCreated>${new Date().toUTCString()}</dateCreated>
+    <dateCreated>${dateCreated.toUTCString()}</dateCreated>
   </head>
   <body>
 ${outlines}

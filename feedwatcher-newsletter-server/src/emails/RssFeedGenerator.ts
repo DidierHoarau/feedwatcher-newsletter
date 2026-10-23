@@ -2,8 +2,8 @@ import RSS from "rss";
 import { Span } from "@opentelemetry/sdk-trace-base";
 import { OTelLogger, OTelTracer } from "../OTelContext";
 import { FeedIdentityGetFeedUrlId, FeedIdentityGetTitle } from "../feeds/FeedIdentity";
-import { HtmlSanitizerGetTextSummary, HtmlSanitizerSanitize } from "./HtmlSanitizer";
-import { EmailItemsListById } from "./EmailsData";
+import { EmailItemsListById, EmailsDataGetFeedLastModified } from "./EmailsData";
+import { SanitizedBodyCacheGet } from "./SanitizedBodyCache";
 
 const logger = OTelLogger().createModuleLogger("RssFeedGenerator");
 
@@ -43,15 +43,15 @@ export function RssFeedGeneratorBuildFeedById(
   });
 
   for (const email of emails) {
-    const sanitizedBody = HtmlSanitizerSanitize(email.body, stripTrackingPixels);
+    const sanitizedBody = SanitizedBodyCacheGet(email, stripTrackingPixels);
     feed.item({
       title: email.subject,
-      description: HtmlSanitizerGetTextSummary(sanitizedBody),
+      description: sanitizedBody.summary,
       url: `${baseUrl}/view/${email.id}`,
       guid: email.id,
       date: email.dateReceived,
       custom_elements: [
-        { "content:encoded": { _cdata: sanitizedBody } },
+        { "content:encoded": { _cdata: sanitizedBody.html } },
         { "newsletter:messageId": email.messageId },
         { "newsletter:senderName": email.senderName },
         { "newsletter:senderEmail": email.senderEmail },
@@ -62,5 +62,15 @@ export function RssFeedGeneratorBuildFeedById(
   }
 
   span.end();
-  return feed.xml({ indent: true });
+  // rss stamps <lastBuildDate> with the wall clock on every build, which would
+  // change the document (and its ETag) on every request. Use the feed's
+  // content/mutation timestamp so unchanged data yields an identical document.
+  const xml = feed.xml({ indent: true });
+  const lastBuildDate = new Date(
+    EmailsDataGetFeedLastModified(id),
+  ).toUTCString();
+  return xml.replace(
+    /<lastBuildDate>[^<]*<\/lastBuildDate>/,
+    `<lastBuildDate>${lastBuildDate}</lastBuildDate>`,
+  );
 }

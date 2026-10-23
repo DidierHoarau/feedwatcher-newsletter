@@ -4,6 +4,8 @@ import { OTelLogger, OTelRequestSpan } from "../OTelContext";
 import { Config } from "../Config";
 import {
   EmailFeedsListAll,
+  EmailsDataGetFeedLastModified,
+  EmailsDataGetLastModified,
   FeedSummary,
 } from "../emails/EmailsData";
 import {
@@ -12,6 +14,7 @@ import {
 } from "../feeds/FeedIdentity";
 import { OpmlGeneratorBuild } from "../feeds/OpmlGenerator";
 import { RssFeedGeneratorBuildFeedById } from "../emails/RssFeedGenerator";
+import { HttpConditionalSend } from "./HttpConditional";
 import { renderFeedsIndexPage } from "./HtmlPages";
 
 const logger = OTelLogger().createModuleLogger("RssRoutes");
@@ -46,14 +49,15 @@ export class RssRoutes {
 
   public getRoutes = async (fastify: FastifyInstance) => {
     // List all available RSS feeds (one per sender). Browsers get a
-    // human-readable index page, API clients keep the JSON array.
+    // human-readable index page, API clients keep the JSON array. Both
+    // representations answer conditional requests and vary on Accept.
     fastify.get("/", async (request, reply) => {
       const { feeds } = getFeedsWithUrls(this.config, request);
       const accept = request.headers.accept || "";
+      const lastModifiedMs = EmailsDataGetLastModified();
       if (accept.includes("text/html")) {
-        reply.header("Content-Type", "text/html; charset=utf-8");
-        return reply.send(
-          renderFeedsIndexPage(
+        return HttpConditionalSend(request, reply, {
+          body: renderFeedsIndexPage(
             feeds.map((f) => ({
               feedUrl: f.feedUrl,
               title: f.title,
@@ -63,33 +67,46 @@ export class RssRoutes {
               latestDate: f.latestDate,
             })),
           ),
-        );
+          contentType: "text/html; charset=utf-8",
+          lastModifiedMs,
+          extraHeaders: { Vary: "Accept" },
+        });
       }
-      return reply.send(
-        feeds.map((f) => ({
-          id: f.feedId,
-          senderName: f.senderName,
-          senderEmail: f.senderEmail,
-          feedUrl: f.feedUrl,
-        })),
-      );
+      return HttpConditionalSend(request, reply, {
+        body: JSON.stringify(
+          feeds.map((f) => ({
+            id: f.feedId,
+            senderName: f.senderName,
+            senderEmail: f.senderEmail,
+            feedUrl: f.feedUrl,
+          })),
+        ),
+        contentType: "application/json; charset=utf-8",
+        lastModifiedMs,
+        extraHeaders: { Vary: "Accept" },
+      });
     });
 
     // OPML 2.0 export: one outline per feed, importable into FeedWatcher
     // and most RSS readers.
     fastify.get("/opml", async (request, reply) => {
       const { feeds, baseUrl } = getFeedsWithUrls(this.config, request);
+      const lastModifiedMs = EmailsDataGetLastModified();
       const xml = OpmlGeneratorBuild(
         "FeedWatcher Newsletter feeds",
         baseUrl,
         feeds,
+        new Date(lastModifiedMs || Date.now()),
       );
-      reply.header("Content-Type", "text/x-opml; charset=utf-8");
-      reply.header(
-        "Content-Disposition",
-        'attachment; filename="feedwatcher-newsletter.opml"',
-      );
-      return reply.send(xml);
+      return HttpConditionalSend(request, reply, {
+        body: xml,
+        contentType: "text/x-opml; charset=utf-8",
+        lastModifiedMs,
+        extraHeaders: {
+          "Content-Disposition":
+            'attachment; filename="feedwatcher-newsletter.opml"',
+        },
+      });
     });
 
     // Get RSS feed for a specific sender by id. Ids may carry the private
@@ -119,8 +136,11 @@ export class RssRoutes {
         return reply.send({ error: "Feed not found" });
       }
 
-      reply.header("Content-Type", "application/rss+xml; charset=utf-8");
-      return reply.send(xml);
+      return HttpConditionalSend(request, reply, {
+        body: xml,
+        contentType: "application/rss+xml; charset=utf-8",
+        lastModifiedMs: EmailsDataGetFeedLastModified(resolved.feedId),
+      });
     });
   };
 }
