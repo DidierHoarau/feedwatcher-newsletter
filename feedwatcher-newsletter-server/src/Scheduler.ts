@@ -9,12 +9,12 @@ import {
   EmailsDataInit,
   EmailsDataPurgeExpired,
   EmailsDataSetRetentionDays,
-  EmailSendersListAll,
+  EmailFeedsListAll,
 } from "./emails/EmailsData";
 import {
-  FeedIdentityGetFeedId,
   FeedIdentityGetFeedUrlId,
   FeedIdentityInit,
+  FeedIdentityPruneTokens,
 } from "./feeds/FeedIdentity";
 
 const logger = OTelLogger().createModuleLogger("Scheduler");
@@ -29,21 +29,23 @@ const RESTART_ONLY_FIELDS = [
   "IMAP_MAILBOX",
   "DATA_DIR",
   "API_PORT",
+  "TRUST_PROXY",
 ] as const;
 
 function logAvailableFeeds(span: Span): void {
   try {
-    const senders = EmailSendersListAll();
-    if (senders.length === 0) {
+    // Only real (non-ignored, non-unknown) feeds: listing raw senders would
+    // create tokens for ignored/unknown senders and log duplicates.
+    const feeds = EmailFeedsListAll();
+    if (feeds.length === 0) {
       logger.info("No RSS feeds", span);
       return;
     }
-    for (const s of senders) {
-      const id = FeedIdentityGetFeedId(s.senderName, s.senderEmail);
-      const urlId = FeedIdentityGetFeedUrlId(id);
+    for (const feed of feeds) {
+      const urlId = FeedIdentityGetFeedUrlId(feed.feedId);
       const url = config.PUBLIC_URL ? `${config.PUBLIC_URL}/rss/${urlId}` : `/rss/${urlId}`;
       logger.info(
-        `RSS Feed: [${id}] ${s.senderName} <${s.senderEmail}> ${url}`,
+        `RSS Feed: [${feed.feedId}] ${feed.senderName} <${feed.senderEmail}> ${url}`,
         span,
       );
     }
@@ -105,6 +107,7 @@ function applyFeedIdentity(): void {
     ignoreList: config.SENDER_IGNORE_LIST,
     overrides: config.FEED_OVERRIDES,
     privateUrls: config.FEED_PRIVATE_URLS,
+    privateUrlsStrict: config.FEED_PRIVATE_URLS_STRICT,
     dataDir: config.DATA_DIR,
   });
 }
@@ -163,6 +166,16 @@ export async function SchedulerInit(context: Span, configIn: Config) {
 
   EmailsDataInit(Number(config.EMAIL_RETENTION_DAYS), config.DATA_DIR);
   applyFeedIdentity();
+  // Startup-only pruning: a temporarily changed ignore list must not revoke
+  // tokens of feeds that may come back.
+  try {
+    FeedIdentityPruneTokens(EmailFeedsListAll().map((feed) => feed.feedId));
+  } catch (err) {
+    logger.warn(
+      `Unable to prune feed tokens: ${(err as Error).message}`,
+      span,
+    );
+  }
 
   logger.info(
     `Scheduling email fetch with cron: ${config.EMAIL_FETCH_CRON}`,

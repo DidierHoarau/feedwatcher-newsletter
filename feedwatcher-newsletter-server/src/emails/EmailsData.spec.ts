@@ -10,6 +10,7 @@ import {
   EmailItemGetById,
   EmailItemsBatchSave,
   EmailItemsGetExistingIds,
+  EmailItemsListById,
   EmailsDataPurgeExpired,
 } from "./EmailsData";
 import { EmailItem } from "./EmailFetcher";
@@ -138,6 +139,39 @@ describe("EmailItemGetById", () => {
     EmailItemsBatchSave([makeItem()]);
     expect(EmailItemGetById("aaaaaaaa-1111-4111-8111-111111111111")).toBeDefined();
     expect(EmailItemGetById("bbbbbbbb-1111-4111-8111-111111111111")).toBeUndefined();
+  });
+});
+
+describe("ignored senders in read paths", () => {
+  const ignoredId = "cccccccc-1111-4111-8111-111111111111";
+
+  beforeEach(() => {
+    FeedIdentityInit({
+      ignoreList: "billing",
+      overrides: {},
+      privateUrls: false,
+      dataDir,
+    });
+    EmailItemsBatchSave([
+      makeItem({
+        messageId: "<ignored@example.com>",
+        id: ignoredId,
+        senderName: "Billing Team",
+        senderEmail: "billing@shop.com",
+      }),
+      makeItem({ messageId: "<normal@example.com>" }),
+    ]);
+  });
+
+  it("omits ignored senders from a feed listing", () => {
+    const items = EmailItemsListById("billingteam");
+    expect(items).toHaveLength(0);
+    expect(EmailItemsListById("thedaily")).toHaveLength(1);
+  });
+
+  it("does not serve an ignored email by id", () => {
+    expect(EmailItemGetById(ignoredId)).toBeUndefined();
+    expect(EmailItemGetById("aaaaaaaa-1111-4111-8111-111111111111")).toBeDefined();
   });
 });
 

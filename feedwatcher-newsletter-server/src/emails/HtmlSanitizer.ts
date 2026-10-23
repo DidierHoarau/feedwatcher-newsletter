@@ -2,41 +2,64 @@ import sanitizeHtml from "sanitize-html";
 
 const SUMMARY_MAX_LENGTH = 500;
 
-const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
-  // img is not in the sanitize-html defaults but newsletter bodies need it
-  allowedTags: sanitizeHtml.defaults.allowedTags.concat(["img"]),
-  allowedSchemes: ["http", "https", "mailto"],
-  allowedAttributes: {
-    ...sanitizeHtml.defaults.allowedAttributes,
-    img: ["src", "alt", "title", "width", "height", "style"],
-    a: ["href", "name", "target", "title"],
-  },
-  // style is kept on images only for width/height, so tracking pixels can be
-  // detected below; everything else is stripped
-  allowedStyles: {
-    img: {
-      width: [/^[0-9.]+(%|px)?$/],
-      height: [/^[0-9.]+(%|px)?$/],
+function buildSanitizeOptions(
+  stripTrackingPixels: boolean,
+): sanitizeHtml.IOptions {
+  return {
+    // img is not in the sanitize-html defaults but newsletter bodies need it
+    allowedTags: sanitizeHtml.defaults.allowedTags.concat(["img"]),
+    allowedSchemes: ["http", "https", "mailto"],
+    allowedAttributes: {
+      ...sanitizeHtml.defaults.allowedAttributes,
+      img: ["src", "alt", "title", "width", "height", "style"],
+      a: ["href", "name", "target", "title"],
     },
-  },
-  allowProtocolRelative: false,
-  transformTags: {
-    a: sanitizeHtml.simpleTransform("a", { target: "_blank", rel: "noopener noreferrer nofollow" }),
-  },
-  exclusiveFilter: (frame) => {
-    if (frame.tag !== "img") {
-      return false;
+    // style is kept on images only for width/height, so tracking pixels can be
+    // detected below; everything else is stripped
+    allowedStyles: {
+      img: {
+        width: [/^[0-9.]+(%|px)?$/],
+        height: [/^[0-9.]+(%|px)?$/],
+      },
+    },
+    allowProtocolRelative: false,
+    transformTags: {
+      a: sanitizeHtml.simpleTransform("a", { target: "_blank", rel: "noopener noreferrer nofollow" }),
+    },
+    exclusiveFilter: (frame) => {
+      if (!stripTrackingPixels || frame.tag !== "img") {
+        return false;
+      }
+      // A tracking pixel is an image with at least one known dimension <= 1
+      // and no known dimension > 1: covers 1x1 images declared with both
+      // dimensions as well as <img width="1"> / style="width:1px" (height
+      // auto). Width/height may come from attributes or inline style.
+      const width = dimensionFromAttribs(frame.attribs.width, frame.attribs.style, "width");
+      const height = dimensionFromAttribs(frame.attribs.height, frame.attribs.style, "height");
+      const known = [width, height].filter(
+        (value): value is number => value !== undefined,
+      );
+      return (
+        known.some((value) => value <= 1) &&
+        !known.some((value) => value > 1)
+      );
+    },
+  };
+}
+
+function dimensionFromAttribs(
+  attribute: string | undefined,
+  style: string | undefined,
+  property: string,
+): number | undefined {
+  if (attribute !== undefined && attribute !== "") {
+    const parsed = Number(attribute);
+    if (Number.isFinite(parsed)) {
+      return parsed;
     }
-    // Tracking pixels: 1x1 (or 0-sized) images whose only purpose is read
-    // receipts. Width/height may come from attributes or inline style.
-    const width = Number(frame.attribs.width ?? widthFromStyle(frame.attribs.style));
-    const height = Number(frame.attribs.height ?? heightFromStyle(frame.attribs.style));
-    if (Number.isNaN(width) || Number.isNaN(height)) {
-      return false;
-    }
-    return width <= 1 && height <= 1;
-  },
-};
+  }
+  return sizeFromStyle(style, property);
+}
 
 function sizeFromStyle(style: string | undefined, property: string): number | undefined {
   if (!style) return undefined;
@@ -44,19 +67,15 @@ function sizeFromStyle(style: string | undefined, property: string): number | un
   return match ? Number(match[1]) : undefined;
 }
 
-function widthFromStyle(style: string | undefined): number | undefined {
-  return sizeFromStyle(style, "width");
-}
-
-function heightFromStyle(style: string | undefined): number | undefined {
-  return sizeFromStyle(style, "height");
-}
-
 // Strip scripts, event handlers, dangerous URLs and tracking pixels while
-// keeping links, images and the regular newsletter layout tags.
-export function HtmlSanitizerSanitize(html: string): string {
+// keeping links, images and the regular newsletter layout tags. Tracking-pixel
+// stripping can be disabled per call (EMAIL_STRIP_TRACKING_PIXELS).
+export function HtmlSanitizerSanitize(
+  html: string,
+  stripTrackingPixels = true,
+): string {
   if (!html) return "";
-  return sanitizeHtml(html, SANITIZE_OPTIONS);
+  return sanitizeHtml(html, buildSanitizeOptions(stripTrackingPixels));
 }
 
 // Plain-text summary of an HTML body, for the RSS <description> element.

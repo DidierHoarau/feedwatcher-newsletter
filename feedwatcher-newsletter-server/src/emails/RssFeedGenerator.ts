@@ -13,13 +13,20 @@ export function RssFeedGeneratorBuildFeedById(
   context: Span,
   id: string,
   baseUrl: string,
-): string {
+  stripTrackingPixels = true,
+): string | undefined {
   const span = OTelTracer().startSpan("RssFeedGeneratorBuildFeedById", context);
   logger.info(`Building RSS feed for id: ${id}`, span);
 
   const emails = EmailItemsListById(id);
-  const senderName = emails.length > 0 ? emails[0].senderName : id;
-  const senderEmail = emails.length > 0 ? emails[0].senderEmail : "";
+  // An unknown (or ignored) feed has no emails: do not advertise it or create
+  // a token for it.
+  if (emails.length === 0) {
+    span.end();
+    return undefined;
+  }
+  const senderName = emails[0].senderName;
+  const senderEmail = emails[0].senderEmail;
   const title = FeedIdentityGetTitle(senderName, senderEmail);
   const feedUrlId = FeedIdentityGetFeedUrlId(id);
 
@@ -36,7 +43,7 @@ export function RssFeedGeneratorBuildFeedById(
   });
 
   for (const email of emails) {
-    const sanitizedBody = HtmlSanitizerSanitize(email.body);
+    const sanitizedBody = HtmlSanitizerSanitize(email.body, stripTrackingPixels);
     feed.item({
       title: email.subject,
       description: HtmlSanitizerGetTextSummary(sanitizedBody),

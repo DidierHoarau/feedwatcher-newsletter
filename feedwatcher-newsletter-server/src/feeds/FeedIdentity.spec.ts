@@ -1,3 +1,4 @@
+import { randomBytes } from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import path from "path";
@@ -7,6 +8,7 @@ import {
   FeedIdentityGetTitle,
   FeedIdentityInit,
   FeedIdentityIsSenderIgnored,
+  FeedIdentityPruneTokens,
   FeedIdentityResolveFeedUrlId,
 } from "./FeedIdentity";
 
@@ -123,6 +125,31 @@ describe("FeedIdentityResolveFeedUrlId", () => {
     });
   });
 
+  it("rejects bare feed ids in strict private mode", () => {
+    initTmp({ privateUrls: true, privateUrlsStrict: true });
+    expect(FeedIdentityResolveFeedUrlId("daily")).toEqual({
+      feedId: "daily",
+      valid: false,
+    });
+  });
+
+  it("still resolves tokenized URLs in strict private mode", () => {
+    initTmp({ privateUrls: true, privateUrlsStrict: true });
+    const urlId = FeedIdentityGetFeedUrlId("daily");
+    expect(FeedIdentityResolveFeedUrlId(urlId)).toEqual({
+      feedId: "daily",
+      valid: true,
+    });
+  });
+
+  it("accepts bare feed ids when private URLs are disabled even in strict mode", () => {
+    initTmp({ privateUrls: false, privateUrlsStrict: true });
+    expect(FeedIdentityResolveFeedUrlId("daily")).toEqual({
+      feedId: "daily",
+      valid: true,
+    });
+  });
+
   it("resolves a valid token URL", () => {
     initTmp({ privateUrls: true });
     const urlId = FeedIdentityGetFeedUrlId("daily");
@@ -138,5 +165,73 @@ describe("FeedIdentityResolveFeedUrlId", () => {
     const resolved = FeedIdentityResolveFeedUrlId("daily.000000000000000000000000");
     expect(resolved.feedId).toBe("daily");
     expect(resolved.valid).toBe(false);
+  });
+
+  it("never creates a token for unknown feed ids (50 probes persist nothing)", () => {
+    const dataDir = initTmp({ privateUrls: true });
+    const tokensPath = path.join(dataDir, "feed-tokens.json");
+    FeedIdentityGetFeedUrlId("daily");
+    const before = fs.readFileSync(tokensPath, "utf8");
+
+    for (let i = 0; i < 50; i++) {
+      const probe = `ghost${i}.${randomBytes(12).toString("hex")}`;
+      expect(FeedIdentityResolveFeedUrlId(probe).valid).toBe(false);
+    }
+
+    expect(fs.readFileSync(tokensPath, "utf8")).toBe(before);
+    expect(Object.keys(JSON.parse(fs.readFileSync(tokensPath, "utf8")))).toEqual([
+      "daily",
+    ]);
+  });
+
+  it("does not create feed-tokens.json for unknown ids", () => {
+    const dataDir = initTmp({ privateUrls: true });
+    expect(FeedIdentityResolveFeedUrlId("ghostfeed.deadbeefdeadbeefdeadbeef")).toEqual({
+      feedId: "ghostfeed",
+      valid: false,
+    });
+    expect(fs.existsSync(path.join(dataDir, "feed-tokens.json"))).toBe(false);
+  });
+
+  it("rejects ids that collide with inherited object properties", () => {
+    const dataDir = initTmp({ privateUrls: true });
+    expect(() => FeedIdentityResolveFeedUrlId("constructor.toString")).not.toThrow();
+    expect(FeedIdentityResolveFeedUrlId("constructor.toString").valid).toBe(false);
+    expect(fs.existsSync(path.join(dataDir, "feed-tokens.json"))).toBe(false);
+  });
+});
+
+describe("FeedIdentityPruneTokens", () => {
+  it("keeps tokens of existing feeds and removes disappeared ones", () => {
+    const dataDir = initTmp({ privateUrls: true });
+    const dailyUrlId = FeedIdentityGetFeedUrlId("daily");
+    FeedIdentityGetFeedUrlId("weekly");
+    const tokensPath = path.join(dataDir, "feed-tokens.json");
+    expect(Object.keys(JSON.parse(fs.readFileSync(tokensPath, "utf8"))).sort()).toEqual([
+      "daily",
+      "weekly",
+    ]);
+
+    FeedIdentityPruneTokens(["daily"]);
+
+    expect(Object.keys(JSON.parse(fs.readFileSync(tokensPath, "utf8")))).toEqual([
+      "daily",
+    ]);
+    // The kept token still resolves.
+    expect(FeedIdentityResolveFeedUrlId(dailyUrlId)).toEqual({
+      feedId: "daily",
+      valid: true,
+    });
+  });
+
+  it("does not rewrite the file when nothing is pruned", () => {
+    const dataDir = initTmp({ privateUrls: true });
+    const tokensPath = path.join(dataDir, "feed-tokens.json");
+    FeedIdentityGetFeedUrlId("daily");
+    const mtime = fs.statSync(tokensPath).mtimeMs;
+
+    FeedIdentityPruneTokens(["daily", "other"]);
+
+    expect(fs.statSync(tokensPath).mtimeMs).toBe(mtime);
   });
 });

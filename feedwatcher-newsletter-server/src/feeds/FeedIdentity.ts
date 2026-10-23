@@ -1,4 +1,4 @@
-import { randomBytes } from "crypto";
+import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import * as fse from "fs-extra";
 import path from "path";
 import { OTelLogger } from "../OTelContext";
@@ -14,12 +14,14 @@ interface FeedIdentityOptions {
   ignoreList: string;
   overrides: Record<string, FeedOverride>;
   privateUrls: boolean;
+  privateUrlsStrict?: boolean;
   dataDir: string;
 }
 
 let ignoreTerms: string[] = [];
 let overrides: Record<string, FeedOverride> = {};
 let privateUrls = false;
+let privateUrlsStrict = false;
 let tokensFilePath = "";
 let tokens: Record<string, string> = {};
 
@@ -30,12 +32,15 @@ export function FeedIdentityInit(options: FeedIdentityOptions): void {
     .filter((term) => term.length > 0);
   overrides = options.overrides || {};
   privateUrls = options.privateUrls;
+  privateUrlsStrict = options.privateUrlsStrict === true;
   tokensFilePath = path.join(options.dataDir, "feed-tokens.json");
   tokens = readTokens();
   logger.info(
     `Feed identity: ${ignoreTerms.length} ignored sender term(s), ${
       Object.keys(overrides).length
-    } override(s), private URLs ${privateUrls ? "enabled" : "disabled"}`,
+    } override(s), private URLs ${privateUrls ? "enabled" : "disabled"}${
+      privateUrls && privateUrlsStrict ? " (strict: bare ids rejected)" : ""
+    }`,
   );
 }
 
@@ -121,8 +126,9 @@ export function FeedIdentityGetTitle(
 
 // Stable unguessable token per feed, persisted so tokens survive restarts.
 export function FeedIdentityGetFeedToken(feedId: string): string {
-  if (tokens[feedId]) {
-    return tokens[feedId];
+  const existing = tokens[feedId];
+  if (typeof existing === "string" && existing.length > 0) {
+    return existing;
   }
   const token = randomBytes(12).toString("hex");
   tokens[feedId] = token;
@@ -140,19 +146,53 @@ export function FeedIdentityGetFeedUrlId(feedId: string): string {
 }
 
 // Resolve an id coming from a feed URL: `<feedId>.<token>` or a bare feed id.
-// The token must match the persisted one when present; bare ids always
-// resolve so existing reader subscriptions keep working.
+// Resolution never creates a token: a dotted id is only valid when it matches
+// a persisted token, so probing random ids cannot grow feed-tokens.json.
+// Bare ids stay valid for existing subscriptions unless strict private mode
+// is enabled.
 export function FeedIdentityResolveFeedUrlId(
   urlId: string,
 ): { feedId: string; valid: boolean } {
   const dotIndex = urlId.lastIndexOf(".");
   if (dotIndex <= 0 || dotIndex === urlId.length - 1) {
-    return { feedId: urlId, valid: true };
+    return { feedId: urlId, valid: !(privateUrls && privateUrlsStrict) };
   }
   const feedId = urlId.slice(0, dotIndex);
   const token = urlId.slice(dotIndex + 1);
   if (!privateUrls) {
     return { feedId, valid: true };
   }
-  return { feedId, valid: FeedIdentityGetFeedToken(feedId) === token };
+  return { feedId, valid: tokenEquals(tokens[feedId], token) };
+}
+
+// Constant-time token comparison: hash both sides first so the comparison is
+// independent of the input lengths. The typeof guard rejects inherited object
+// properties (feed ids are unvalidated URL input, e.g. "constructor").
+function tokenEquals(expected: string | undefined, provided: string): boolean {
+  if (typeof expected !== "string" || expected.length === 0) {
+    return false;
+  }
+  const expectedDigest = createHash("sha256").update(expected).digest();
+  const providedDigest = createHash("sha256").update(provided).digest();
+  return timingSafeEqual(expectedDigest, providedDigest);
+}
+
+// Delete tokens of feeds that no longer exist. Called at startup so probes and
+// disappeared senders do not accumulate entries; tokens of existing feeds are
+// preserved and the file is only rewritten when something changed.
+export function FeedIdentityPruneTokens(feedIds: Iterable<string>): void {
+  const keep = new Set(feedIds);
+  let removed = 0;
+  for (const feedId of Object.keys(tokens)) {
+    if (!keep.has(feedId)) {
+      delete tokens[feedId];
+      removed++;
+    }
+  }
+  if (removed > 0) {
+    writeTokens();
+    logger.info(
+      `Pruned ${removed} feed token(s) for feeds that no longer exist`,
+    );
+  }
 }

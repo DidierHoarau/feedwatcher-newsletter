@@ -23,8 +23,10 @@ function makeItem(overrides: Partial<EmailItem> = {}): EmailItem {
   };
 }
 
+let dataDir: string;
+
 beforeAll(() => {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "rssgen-"));
+  dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "rssgen-"));
   EmailsDataInit(7, dataDir);
   FeedIdentityInit({
     ignoreList: "",
@@ -43,7 +45,7 @@ describe("RssFeedGeneratorBuildFeedById", () => {
       span,
       "thedaily",
       "https://svc.example.com",
-    );
+    ) as string;
     expect(xml).toContain("<content:encoded>");
     expect(xml).toContain("<p>Hello <b>world</b></p>");
     expect(xml).not.toContain("<script>");
@@ -58,7 +60,7 @@ describe("RssFeedGeneratorBuildFeedById", () => {
       span,
       "thedaily",
       "https://svc.example.com",
-    );
+    ) as string;
     expect(xml).toContain(
       "<link>https://svc.example.com/view/11111111-1111-4111-8111-111111111111</link>",
     );
@@ -71,9 +73,73 @@ describe("RssFeedGeneratorBuildFeedById", () => {
       span,
       "thedaily",
       "https://svc.example.com",
-    );
+    ) as string;
     expect(xml).toContain('xmlns:newsletter="https://github.com/DidierHoarau/feedwatcher-newsletter/ns/1.0"');
     expect(xml).toContain("<ttl>60</ttl>");
     expect(xml).toContain("<newsletter:messageId>");
+  });
+
+  it("strips one-dimension tracking pixels by default", () => {
+    EmailItemsBatchSave([
+      makeItem({
+        id: "22222222-2222-4222-8222-222222222222",
+        messageId: "<one-dimension@example.com>",
+        body: '<p>Hi</p><img src="https://tracker.example/one" width="1">',
+      }),
+    ]);
+    const span = OTelTracer().startSpan("test");
+    const xml = RssFeedGeneratorBuildFeedById(
+      span,
+      "thedaily",
+      "https://svc.example.com",
+    ) as string;
+    expect(xml).not.toContain("tracker.example/one");
+  });
+
+  it("keeps tracking pixels when stripping is disabled", () => {
+    EmailItemsBatchSave([
+      makeItem({
+        id: "33333333-3333-4333-8333-333333333333",
+        messageId: "<keep-pixel@example.com>",
+        body: '<p>Hi</p><img src="https://tracker.example/keep" width="1">',
+      }),
+    ]);
+    const span = OTelTracer().startSpan("test");
+    const xml = RssFeedGeneratorBuildFeedById(
+      span,
+      "thedaily",
+      "https://svc.example.com",
+      false,
+    ) as string;
+    expect(xml).toContain("tracker.example/keep");
+  });
+
+  it("returns undefined for an unknown feed id and creates no token", () => {
+    const tokensDir = fs.mkdtempSync(path.join(os.tmpdir(), "rssgen-tokens-"));
+    FeedIdentityInit({
+      ignoreList: "",
+      overrides: {},
+      privateUrls: true,
+      dataDir: tokensDir,
+    });
+    try {
+      const span = OTelTracer().startSpan("test");
+      const xml = RssFeedGeneratorBuildFeedById(
+        span,
+        "ghostfeed",
+        "https://svc.example.com",
+      );
+      expect(xml).toBeUndefined();
+      expect(fs.existsSync(path.join(tokensDir, "feed-tokens.json"))).toBe(
+        false,
+      );
+    } finally {
+      FeedIdentityInit({
+        ignoreList: "",
+        overrides: {},
+        privateUrls: false,
+        dataDir,
+      });
+    }
   });
 });

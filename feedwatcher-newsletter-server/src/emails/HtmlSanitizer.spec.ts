@@ -48,6 +48,38 @@ describe("HtmlSanitizerSanitize", () => {
     );
     expect(out).toContain("photo.jpg");
   });
+
+  it("strips one-dimension tracking pixels (width or height only)", () => {
+    const cases = [
+      '<img src="https://tracker.example/w" width="1">',
+      '<img src="https://tracker.example/h" height="1">',
+      '<img src="https://tracker.example/sw" style="width:1px">',
+      '<img src="https://tracker.example/sh" style="height:1px">',
+      '<img src="https://tracker.example/sa" style="width:1px;height:auto">',
+    ];
+    for (const html of cases) {
+      expect(HtmlSanitizerSanitize(html)).not.toContain("tracker.example");
+    }
+  });
+
+  it("keeps images with one small and one large known dimension", () => {
+    const out = HtmlSanitizerSanitize(
+      '<img src="https://example.com/line.gif" width="1" height="10">',
+    );
+    expect(out).toContain("line.gif");
+  });
+
+  it("keeps tracking pixels when stripping is disabled", () => {
+    const twoDimensions =
+      '<img src="https://tracker.example/2d" width="1" height="1">';
+    const oneDimension = '<img src="https://tracker.example/1d" width="1">';
+    expect(HtmlSanitizerSanitize(twoDimensions, false)).toContain(
+      "tracker.example/2d",
+    );
+    expect(HtmlSanitizerSanitize(oneDimension, false)).toContain(
+      "tracker.example/1d",
+    );
+  });
 });
 
 describe("HtmlSanitizerGetTextSummary", () => {

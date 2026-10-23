@@ -8,7 +8,7 @@ This project is a server-only companion to FeedWatcher. It has no UI and require
 
 One RSS feed is generated per unique sender name. Each feed's items are the email bodies (HTML preferred, plain text fallback) from that sender, ordered by date received.
 
-Email bodies are sanitized when served (scripts, event handlers, dangerous URLs and 1x1 tracking pixels are stripped), each item links to a readable web view of the email, and feeds advertise near-real-time ingestion via IMAP IDLE with the cron schedule as fallback. Feed URLs can be made unguessable with a per-feed token, senders can be ignored or renamed via configuration, and all feeds can be imported anywhere through OPML export.
+Email bodies are sanitized when served (scripts, event handlers, dangerous URLs and tracking pixels are stripped), each item links to a readable web view of the email, and feeds advertise near-real-time ingestion via IMAP IDLE with the cron schedule as fallback. Feed URLs can carry a per-feed token, senders can be ignored or renamed via configuration, and all feeds can be imported anywhere through OPML export. Tokenized URLs only obfuscate feed addresses; the service has no authentication by default — see [Security and privacy](#security-and-privacy).
 
 # Deployment
 
@@ -97,6 +97,22 @@ spec:
     app: feedwatcher-newsletter
 ```
 
+# Security and privacy
+
+By default the service has **no authentication**: anyone who can reach the host can list the feeds (`/rss/` HTML index and JSON list), fetch any feed and open any email at `/view/:emailId`. `FEED_PRIVATE_URLS` only obfuscates feed URLs (`<feedId>.<token>`): the index and the OPML export publish those URLs to every caller, and bare feed ids keep working unless strict private mode is enabled. Treat tokenized URLs as a convenience, not as access control. `SENDER_IGNORE_LIST` is enforced on every read path, so ignored senders are never listed and their feeds and permalinks are never served.
+
+## HTTP Basic authentication (optional)
+
+Set `AUTH_PASSWORD` (and optionally `AUTH_USERNAME`, default `feedwatcher`) to require HTTP Basic credentials on `/`, `/rss/*` and `/view/*`. `/api/status` stays open for readiness probes. Authentication is disabled while `AUTH_PASSWORD` is empty, so an unchanged deployment keeps serving existing subscribers. Configure every feed reader (and browser) with the same credentials, and only send them over HTTPS. The password is registered as sensitive and masked in configuration logs; `AUTH_USERNAME` and `AUTH_PASSWORD` are applied on hot configuration reload.
+
+## Strict private mode (optional)
+
+With `FEED_PRIVATE_URLS=true` and `FEED_PRIVATE_URLS_STRICT=true`, requests using a bare feed id are rejected with `404`; only `<feedId>.<token>` URLs are served. This is opt-in because bare-id subscriptions stop working: update every reader to the tokenized URLs advertised by `/rss/` before enabling it. Strict mode does not replace authentication — it only makes URLs harder to guess.
+
+## Feed URLs and proxies
+
+`PUBLIC_URL` is authoritative for the URLs advertised by the index, the OPML export and the feed metadata. When it is empty, URLs are derived from the request: the `Host` header including its port, and the request protocol. Without `PUBLIC_URL` the `Host` header is client-controlled, so a caller can poison the URLs it receives. Behind a trusted reverse proxy, set `TRUST_PROXY=true` (restart-only) so `X-Forwarded-Proto`/`X-Forwarded-Host` are used; leave it `false` otherwise.
+
 # Configuration
 
 Configuration values can be set via environment variables or through the `config.json` file. Environment variables take precedence over config file values, which take precedence over defaults.
@@ -119,6 +135,7 @@ Configuration values can be set via environment variables or through the `config
 | Variable                   | Description                                                                   | Default                 |
 | -------------------------- | ----------------------------------------------------------------------------- | ----------------------- |
 | `PUBLIC_URL`               | Public base URL of the service (used in feed URLs; empty = from the request)  | `` (empty)              |
+| `TRUST_PROXY`              | Trust `X-Forwarded-Proto`/`X-Forwarded-Host` from a reverse proxy (restart-only, see [Feed URLs and proxies](#feed-urls-and-proxies)) | `false` |
 | `EMAIL_FETCH_CRON`         | Cron expression for the email fetch schedule (fallback for IMAP IDLE)         | `0 * * * *` (hourly)    |
 | `EMAIL_RETENTION_DAYS`     | Number of days to retain emails before purging                                | `3`                     |
 | `DATA_DIR`                 | Directory for persisting email data                                           | `/data`                 |
@@ -138,10 +155,20 @@ Configuration values can be set via environment variables or through the `config
 
 | Variable                      | Description                                                                        | Default |
 | ----------------------------- | ---------------------------------------------------------------------------------- | ------- |
-| `EMAIL_STRIP_TRACKING_PIXELS` | Strip 1x1 tracking-pixel images from email bodies                                  | `true`  |
-| `FEED_PRIVATE_URLS`           | Advertise unguessable feed URLs (`<feedId>.<token>`); bare feed ids keep working   | `true`  |
+| `EMAIL_STRIP_TRACKING_PIXELS` | Strip tracking-pixel images (1x1, or a single known dimension ≤ 1) from email bodies; `false` keeps them | `true`  |
+| `FEED_PRIVATE_URLS`           | Advertise tokenized feed URLs (`<feedId>.<token>`); bare feed ids keep working unless `FEED_PRIVATE_URLS_STRICT=true` | `true`  |
+| `FEED_PRIVATE_URLS_STRICT`    | With `FEED_PRIVATE_URLS=true`, reject bare feed ids with `404` (opt-in; bare-id subscriptions stop working) | `false` |
 | `SENDER_IGNORE_LIST`          | Comma-separated sender name/email fragments whose emails never become feeds        | `` (empty)              |
 | `FEED_OVERRIDES`              | JSON object mapping a sender email or name to a stable feed id and/or title        | `{}`    |
+
+## Access control
+
+| Variable        | Description                                                                  | Default          |
+| --------------- | ---------------------------------------------------------------------------- | ---------------- |
+| `AUTH_USERNAME` | HTTP Basic username required when authentication is enabled                  | `feedwatcher`    |
+| `AUTH_PASSWORD` | HTTP Basic password; empty disables authentication (sensitive, masked in logs) | `` (empty)     |
+
+When authentication is enabled (non-empty `AUTH_PASSWORD`), every endpoint except `/api/status` returns `401` without valid Basic credentials — see [Security and privacy](#security-and-privacy).
 
 `FEED_OVERRIDES` example (stabilizes identity when a newsletter renames itself, merges senders into one feed, or renames a feed):
 
@@ -163,7 +190,7 @@ Configuration values can be set via environment variables or through the `config
 
 ## Configuration reload
 
-`config.json` is watched and reloaded without a restart. These values are applied immediately: `EMAIL_FETCH_CRON` (the job is rescheduled), `EMAIL_RETENTION_DAYS`, `EMAIL_FETCH_IDLE` (the IDLE connection is started or stopped), `SENDER_IGNORE_LIST`, `FEED_OVERRIDES`, `FEED_PRIVATE_URLS`, `PUBLIC_URL` and the `EMAIL_FETCH_*` knobs. These are **restart-only** (a warning is logged when they change): `IMAP_HOST`, `IMAP_PORT`, `IMAP_TLS`, `IMAP_USER`, `IMAP_PASSWORD`, `IMAP_MAILBOX`, `DATA_DIR`, `API_PORT` and the OpenTelemetry exporter settings. An unreadable or invalid `config.json` is ignored and the last valid configuration stays active.
+`config.json` is watched and reloaded without a restart. These values are applied immediately: `EMAIL_FETCH_CRON` (the job is rescheduled), `EMAIL_RETENTION_DAYS`, `EMAIL_FETCH_IDLE` (the IDLE connection is started or stopped), `SENDER_IGNORE_LIST`, `FEED_OVERRIDES`, `FEED_PRIVATE_URLS`, `FEED_PRIVATE_URLS_STRICT`, `AUTH_USERNAME`, `AUTH_PASSWORD`, `PUBLIC_URL` and the `EMAIL_FETCH_*` knobs. These are **restart-only** (a warning is logged when they change): `IMAP_HOST`, `IMAP_PORT`, `IMAP_TLS`, `IMAP_USER`, `IMAP_PASSWORD`, `IMAP_MAILBOX`, `DATA_DIR`, `API_PORT`, `TRUST_PROXY` and the OpenTelemetry exporter settings. An unreadable or invalid `config.json` is ignored and the last valid configuration stays active.
 
 ## OpenTelemetry
 
@@ -179,16 +206,18 @@ Configuration values can be set via environment variables or through the `config
 
 # API
 
+When authentication is enabled (`AUTH_PASSWORD` non-empty), every endpoint below requires HTTP Basic credentials and returns `401` otherwise; `/api/status` stays open for probes.
+
 | Method | Path              | Description                                              |
 | ------ | ----------------- | -------------------------------------------------------- |
 | `GET`  | `/rss/`           | List all available RSS feeds — HTML index page for browsers, JSON array for API clients |
 | `GET`  | `/rss/opml`       | OPML 2.0 export of all feeds (importable into FeedWatcher and most RSS readers) |
-| `GET`  | `/rss/:id`        | Get the RSS feed for a specific sender by sender ID      |
-| `GET`  | `/view/:emailId`  | Readable web view of one email (the feed items' permalink target) |
+| `GET`  | `/rss/:id`        | Get the RSS feed for a specific sender by sender ID; `404` for unknown feeds, invalid tokens and ignored senders |
+| `GET`  | `/view/:emailId`  | Readable web view of one email (the feed items' permalink target); `404` for unknown or ignored emails |
 
 The sender ID is derived from the sender name by lowercasing it and removing all non-alphanumeric characters (e.g., `"The Daily Newsletter"` → `thedailynewsletter`). It can be overridden per sender with `FEED_OVERRIDES`.
 
-When `FEED_PRIVATE_URLS` is enabled (default), the list and the OPML export advertise feed URLs of the form `<feedId>.<randomToken>` (e.g. `thedailynewsletter.9f86d081884c7d65`), persisted in `DATA_DIR/feed-tokens.json`. Bare feed ids keep working so existing reader subscriptions are unaffected.
+When `FEED_PRIVATE_URLS` is enabled (default), the list and the OPML export advertise feed URLs of the form `<feedId>.<randomToken>` (e.g. `thedailynewsletter.9f86d081884c7d65`), persisted in `DATA_DIR/feed-tokens.json`. Tokens are created only for existing feeds, are pruned at startup when their feed disappears, and an invalid token never creates an entry. Bare feed ids keep working so existing reader subscriptions are unaffected, unless `FEED_PRIVATE_URLS_STRICT=true` is set — then bare ids return `404` and only tokenized URLs are served.
 
 The JSON list response returns the following fields per sender:
 
