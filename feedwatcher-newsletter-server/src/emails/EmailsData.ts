@@ -525,3 +525,8 @@ export function EmailsDataSetRetentionDays(days: number): void {
 export function EmailItemsGetExistingIds(): Set<string> {
   return new Set(recordsByMessageId.keys());
 }
+
+// Number of indexed emails (one per unique message id), for the status probe.
+export function EmailsDataGetRecordCount(): number {
+  return recordsByMessageId.size;
+}

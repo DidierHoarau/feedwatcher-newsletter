@@ -224,6 +224,10 @@ When authentication is enabled (non-empty `AUTH_PASSWORD`), every endpoint excep
 | `OPENTELEMETRY_COLLECTOR_AWS`                             | Enable AWS OTel collector                   | `false` |
 | `OPENTELEMETRY_COLLECT_AUTHORIZATION_HEADER`              | Authorization header for the OTel collector |         |
 
+Tracing covers the product routes: `/`, `/rss/*` and `/view/*` produce an HTTP server span (`GET-<route>`), and each feed build runs inside it as a `RssFeedGeneratorBuildFeedById` child span. Requests that match no route are named by their method (`GET`) to keep span-name cardinality bounded. `/api/status` is excluded from tracing because the readiness probe pollutes the trace list with it. The service emits **no metrics**: the Fastify hooks are registered without a meter.
+
+`service.version` is read from `feedwatcher-newsletter-server/package.json` (the runtime image ships that manifest), so traces, logs and metrics identify the application version rather than the installed shared library version. An explicit `VERSION` environment variable or config file value still overrides it.
+
 # API
 
 When authentication is enabled (`AUTH_PASSWORD` non-empty), every endpoint below requires HTTP Basic credentials and returns `401` otherwise; `/api/status` stays open for probes.
@@ -234,6 +238,7 @@ When authentication is enabled (`AUTH_PASSWORD` non-empty), every endpoint below
 | `GET`  | `/rss/opml`       | OPML 2.0 export of all feeds (importable into FeedWatcher and most RSS readers) |
 | `GET`  | `/rss/:id`        | Get the RSS feed for a specific sender by sender ID; `404` for unknown feeds, invalid tokens and ignored senders |
 | `GET`  | `/view/:emailId`  | Readable web view of one email (the feed items' permalink target); `404` for unknown or ignored emails |
+| `GET`  | `/api/status`     | Unauthenticated readiness and ingestion health snapshot (see below); excluded from tracing |
 
 The sender ID is derived from the sender name by lowercasing it and removing all non-alphanumeric characters (e.g., `"The Daily Newsletter"` → `thedailynewsletter`). It can be overridden per sender with `FEED_OVERRIDES`.
 
@@ -253,3 +258,24 @@ The JSON list response returns the following fields per sender:
   }
 ]
 ```
+
+## Status
+
+`GET /api/status` is unauthenticated (the Kubernetes readiness probe calls it every 10 s) and returns an in-memory snapshot of the ingestion health without any credentials or email content:
+
+```json
+{
+  "started": true,
+  "lastSuccessfulFetchAt": "2026-10-23T05:00:12.345Z",
+  "lastUid": 1234,
+  "uidvalidity": 7,
+  "recordCount": 42,
+  "idle": { "enabled": true, "connected": true },
+  "lastError": null
+}
+```
+
+- `lastSuccessfulFetchAt` and `lastError` are in-memory and reset on restart; `lastError` is reduced to one line and truncated to 500 characters (no stacks).
+- `lastUid`/`uidvalidity` mirror the durable resume marker `DATA_DIR/last-uid.json`.
+- `recordCount` is the number of indexed emails (one per unique message id).
+- `idle.enabled` stays `true` while IMAP IDLE is running; `idle.connected` turns `false` while it is waiting to reconnect — a stall detector can compare both.

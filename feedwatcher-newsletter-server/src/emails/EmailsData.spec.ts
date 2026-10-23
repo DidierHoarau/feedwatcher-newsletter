@@ -6,6 +6,7 @@ import {
   EmailsDataInit,
   EmailDataGetUidState,
   EmailDataSetUidState,
+  EmailsDataGetRecordCount,
   EmailFeedsListAll,
   EmailItemGetById,
   EmailItemsBatchSave,
@@ -478,5 +479,39 @@ describe("UID state", () => {
   it("falls back to a full re-scan when the marker is corrupt", () => {
     fs.writeFileSync(path.join(dataDir, "last-uid.json"), "{not json");
     expect(EmailDataGetUidState()).toEqual({ uid: 0, uidvalidity: 0 });
+  });
+});
+
+describe("EmailsDataGetRecordCount", () => {
+  it("counts unique indexed messages", () => {
+    expect(EmailsDataGetRecordCount()).toBe(0);
+
+    EmailItemsBatchSave([
+      makeItem(),
+      makeItem({
+        id: "bbbbbbbb-2222-4222-8222-222222222222",
+        messageId: "<msg-2@example.com>",
+      }),
+    ]);
+    expect(EmailsDataGetRecordCount()).toBe(2);
+
+    // A re-saved message replaces its record: the count stays stable.
+    EmailItemsBatchSave([makeItem()]);
+    expect(EmailsDataGetRecordCount()).toBe(2);
+  });
+
+  it("drops purged messages from the count", () => {
+    EmailItemsBatchSave([
+      makeItem({ messageId: "<old@example.com>", dateReceived: "2020-01-01T00:00:00.000Z" }),
+      makeItem({
+        id: "cccccccc-3333-4333-8333-333333333333",
+        messageId: "<new@example.com>",
+      }),
+    ]);
+    expect(EmailsDataGetRecordCount()).toBe(2);
+
+    EmailsDataPurgeExpired();
+
+    expect(EmailsDataGetRecordCount()).toBe(1);
   });
 });

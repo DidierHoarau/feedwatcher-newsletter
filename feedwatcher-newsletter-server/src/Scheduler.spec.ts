@@ -35,14 +35,18 @@ jest.mock("node-schedule", () => ({
 jest.mock("./utils-std-ts/Timeout", () => ({
   TimeoutWait: jest.fn(),
 }));
+jest.mock("./ServerStatus", () => ({
+  ServerStatusRecordFetchSuccess: jest.fn(),
+  ServerStatusRecordFetchError: jest.fn(),
+}));
 jest.mock("./OTelContext", () => {
-  const span = { end: jest.fn() };
   const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+  const startSpan = jest.fn();
   return {
     OTelLogger: () => ({ createModuleLogger: () => logger }),
-    OTelTracer: () => ({ startSpan: jest.fn(() => span) }),
-    __mockSpan: span,
+    OTelTracer: () => ({ startSpan }),
     __mockLogger: logger,
+    __startSpan: startSpan,
   };
 });
 
@@ -53,6 +57,11 @@ const feedsMock = EmailFeedsListAll as unknown as jest.Mock;
 const pruneTokensMock = FeedIdentityPruneTokens as unknown as jest.Mock;
 const timeoutMock = TimeoutWait as unknown as jest.Mock;
 const mockLogger = jest.requireMock("./OTelContext").__mockLogger;
+const startSpanMock = jest.requireMock("./OTelContext").__startSpan as jest.Mock;
+const recordSuccessMock = jest.requireMock("./ServerStatus")
+  .ServerStatusRecordFetchSuccess as jest.Mock;
+const recordErrorMock = jest.requireMock("./ServerStatus")
+  .ServerStatusRecordFetchError as jest.Mock;
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return Object.assign(new Config(), {
@@ -93,6 +102,7 @@ async function flushAsync(): Promise<void> {
 
 beforeEach(() => {
   jest.resetAllMocks();
+  startSpanMock.mockImplementation(() => ({ end: jest.fn() }));
   fetchMock.mockResolvedValue(undefined);
   feedsMock.mockReturnValue([]);
   timeoutMock.mockResolvedValue(undefined);
@@ -266,5 +276,66 @@ describe("SchedulerReload", () => {
         "IMAP_TLS_INSECURE, IMAP_TLS_CA_FILE",
       ),
     );
+  });
+});
+
+describe("startup fetch span and fetch health", () => {
+  it("starts a root span that outlives SchedulerInit and ends when the fetch settles", async () => {
+    const startupFetch = deferred();
+    fetchMock.mockReturnValueOnce(startupFetch.promise);
+    const initSpan = makeSpan();
+
+    await SchedulerInit(initSpan, makeConfig());
+
+    expect(startSpanMock.mock.calls.map((call) => call[0])).toEqual([
+      "SchedulerInit",
+      "StartupEmailFetch",
+    ]);
+    // The startup fetch span is a root span: no parent argument.
+    expect(startSpanMock.mock.calls[1]).toEqual(["StartupEmailFetch"]);
+    // The SchedulerInit span ends as soon as init returns...
+    const schedulerSpan = startSpanMock.mock.results[0].value;
+    expect(schedulerSpan.end).toHaveBeenCalledTimes(1);
+    const startupSpan = startSpanMock.mock.results[1].value;
+    expect(startupSpan.end).not.toHaveBeenCalled();
+
+    // ...but the startup span only ends once the background fetch settles.
+    startupFetch.resolve();
+    await flushAsync();
+    expect(startupSpan.end).toHaveBeenCalledTimes(1);
+    expect(recordSuccessMock).toHaveBeenCalledTimes(1);
+    expect(recordErrorMock).not.toHaveBeenCalled();
+  });
+
+  it("ends the startup span and records a single error when the fetch fails", async () => {
+    fetchMock.mockRejectedValueOnce(new Error("imap down"));
+
+    await SchedulerInit(makeSpan(), makeConfig({ EMAIL_FETCH_RETRIES: 0 }));
+    await flushAsync();
+
+    const startupSpan = startSpanMock.mock.results[1].value;
+    expect(startupSpan.end).toHaveBeenCalledTimes(1);
+    expect(recordErrorMock).toHaveBeenCalledTimes(1);
+    expect(recordErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "imap down" }),
+    );
+    expect(recordSuccessMock).not.toHaveBeenCalled();
+  });
+
+  it("records no fetch health for a skipped trigger", async () => {
+    const startupFetch = deferred();
+    fetchMock.mockReturnValueOnce(startupFetch.promise);
+    await SchedulerInit(makeSpan(), makeConfig());
+    const cronCallback = scheduleJobMock.mock.calls[0][1];
+
+    cronCallback();
+    await flushAsync();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(recordSuccessMock).not.toHaveBeenCalled();
+    expect(recordErrorMock).not.toHaveBeenCalled();
+
+    startupFetch.resolve();
+    await flushAsync();
+    expect(recordSuccessMock).toHaveBeenCalledTimes(1);
   });
 });

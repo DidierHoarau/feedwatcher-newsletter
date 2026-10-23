@@ -12,10 +12,13 @@ import {
   EmailFeedsListAll,
 } from "./emails/EmailsData";
 import {
-  FeedIdentityGetFeedUrlId,
   FeedIdentityInit,
   FeedIdentityPruneTokens,
 } from "./feeds/FeedIdentity";
+import {
+  ServerStatusRecordFetchError,
+  ServerStatusRecordFetchSuccess,
+} from "./ServerStatus";
 
 const logger = OTelLogger().createModuleLogger("Scheduler");
 
@@ -36,21 +39,7 @@ const RESTART_ONLY_FIELDS = [
 
 function logAvailableFeeds(span: Span): void {
   try {
-    // Only real (non-ignored, non-unknown) feeds: listing raw senders would
-    // create tokens for ignored/unknown senders and log duplicates.
-    const feeds = EmailFeedsListAll();
-    if (feeds.length === 0) {
-      logger.info("No RSS feeds", span);
-      return;
-    }
-    for (const feed of feeds) {
-      const urlId = FeedIdentityGetFeedUrlId(feed.feedId);
-      const url = config.PUBLIC_URL ? `${config.PUBLIC_URL}/rss/${urlId}` : `/rss/${urlId}`;
-      logger.info(
-        `RSS Feed: [${feed.feedId}] ${feed.senderName} <${feed.senderEmail}> ${url}`,
-        span,
-      );
-    }
+    logger.info(`Available RSS feeds: ${EmailFeedsListAll().length}`, span);
   } catch (err) {
     // A journal read error after a successful fetch is not a fetch failure.
     logger.warn(
@@ -124,6 +113,20 @@ function runIdleFetch(): void {
     });
 }
 
+// The startup fetch gets its own root span: the SchedulerInit span is ended
+// when init returns, so a fetch parented to it would outlive its parent.
+function runStartupFetch(): void {
+  const startupSpan = OTelTracer().startSpan("StartupEmailFetch");
+  SchedulerTriggerFetch("startup", startupSpan)
+    .then(() => logAvailableFeeds(startupSpan))
+    .catch((err) => {
+      logger.error(`Error fetching emails on startup`, err, startupSpan);
+    })
+    .finally(() => {
+      startupSpan.end();
+    });
+}
+
 function runCronFetch(): void {
   const jobSpan = OTelTracer().startSpan("ScheduledEmailFetch");
   EmailsDataPurgeExpired();
@@ -156,9 +159,17 @@ export function SchedulerTriggerFetch(
     return Promise.resolve();
   }
   fetchInProgress = true;
-  return fetchEmailsWithRetry(context, config).finally(() => {
-    fetchInProgress = false;
-  });
+  return fetchEmailsWithRetry(context, config)
+    .then(() => {
+      ServerStatusRecordFetchSuccess();
+    })
+    .catch((err) => {
+      ServerStatusRecordFetchError(err);
+      throw err;
+    })
+    .finally(() => {
+      fetchInProgress = false;
+    });
 }
 
 export async function SchedulerInit(context: Span, configIn: Config) {
@@ -189,11 +200,7 @@ export async function SchedulerInit(context: Span, configIn: Config) {
   IdleWatcherStart(config, runIdleFetch);
 
   // Run immediately on startup
-  SchedulerTriggerFetch("startup", span)
-    .then(() => logAvailableFeeds(span))
-    .catch((err) => {
-      logger.error(`Error fetching emails on startup`, err, span);
-    });
+  runStartupFetch();
 
   // Schedule hourly (or per configured cron)
   fetchJob = schedule.scheduleJob(config.EMAIL_FETCH_CRON, runCronFetch);

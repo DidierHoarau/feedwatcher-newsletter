@@ -11,6 +11,7 @@ import { OTelSetTracer } from "./OTelContext";
 import {
   EmailsDataInit,
   EmailItemsBatchSave,
+  EmailDataSetUidState,
   EmailsDataPurgeExpired,
 } from "./emails/EmailsData";
 import { EmailItem } from "./emails/EmailFetcher";
@@ -400,6 +401,64 @@ describe("base URL", () => {
     const untrustedFeeds = untrusted.json() as { feedUrl: string }[];
     expect(untrustedFeeds[0].feedUrl).not.toContain("feeds.example.com");
     expect(untrustedFeeds[0].feedUrl).toMatch(/^http:\/\/localhost(:\d+)?\/rss\//);
+  });
+});
+
+describe("status route", () => {
+  let isolatedDir: string;
+
+  beforeEach(() => {
+    isolatedDir = fs.mkdtempSync(path.join(os.tmpdir(), "appbuilder-status-"));
+    EmailsDataInit(7, isolatedDir);
+    FeedIdentityInit({
+      ignoreList: "",
+      overrides: {},
+      privateUrls: false,
+      dataDir: isolatedDir,
+    });
+    EmailItemsBatchSave([
+      makeItem(),
+      makeItem({
+        id: DAILY_2_ID,
+        messageId: "<daily-2@example.com>",
+        subject: "Second daily issue",
+        body: "<p>Second body</p>",
+        dateReceived: "2026-10-16T08:00:00.000Z",
+      }),
+    ]);
+    EmailDataSetUidState(3, 9);
+  });
+
+  afterEach(() => {
+    EmailsDataInit(7, dataDir);
+    initFeedIdentity();
+  });
+
+  it("returns the ingestion status snapshot with exactly the documented fields", async () => {
+    const response = await build(
+      makeConfig({ DATA_DIR: isolatedDir }),
+    ).inject({ method: "GET", url: "/api/status" });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(
+      [
+        "started",
+        "lastSuccessfulFetchAt",
+        "lastUid",
+        "uidvalidity",
+        "recordCount",
+        "idle",
+        "lastError",
+      ].sort(),
+    );
+    expect(body.started).toBe(true);
+    expect(body.lastSuccessfulFetchAt).toBeNull();
+    expect(body.lastError).toBeNull();
+    expect(body.lastUid).toBe(3);
+    expect(body.uidvalidity).toBe(9);
+    expect(body.recordCount).toBe(2);
+    expect(body.idle).toEqual({ enabled: false, connected: false });
   });
 });
 

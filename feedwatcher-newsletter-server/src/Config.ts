@@ -1,5 +1,26 @@
 import { ConfigBase } from "@devopsplaybook.io/common-utils";
+import * as fs from "fs";
+import path from "path";
 import { FeedOverride } from "./feeds/FeedIdentity";
+
+// ConfigBase reports the shared library's own version; telemetry must identify
+// this service. Resolves from src (Jest) and from dist (node dist/App.js).
+function detectServerVersion(): string {
+  try {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.resolve(__dirname, "../package.json"), "utf8"),
+    );
+    if (
+      pkg?.name === "feedwatcher-newsletter-server" &&
+      typeof pkg.version === "string"
+    ) {
+      return pkg.version;
+    }
+  } catch {
+    // fall through
+  }
+  return "0.0.0";
+}
 
 export class Config extends ConfigBase {
   // IMAP settings
@@ -80,6 +101,9 @@ export class Config extends ConfigBase {
 
   constructor() {
     super("feedwatcher-newsletter-server");
+    // An explicit VERSION env/config value still wins: reload() only
+    // overwrites VERSION when one is supplied.
+    this.VERSION = detectServerVersion();
     this.addConfigField({ field: "IMAP_HOST" });
     this.addConfigField({ field: "IMAP_PORT" });
     this.addConfigField({ field: "IMAP_TLS" });

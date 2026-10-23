@@ -22,7 +22,8 @@ RUN apk add --no-cache ca-certificates
 COPY --from=builder /opt/src/feedwatcher-newsletter-server/node_modules /opt/app/feedwatcher-newsletter/node_modules
 COPY --from=builder /opt/src/feedwatcher-newsletter-server/dist /opt/app/feedwatcher-newsletter/dist
 COPY feedwatcher-newsletter-server/config.json /opt/app/feedwatcher-newsletter/config.json
-COPY package.json /opt/app/feedwatcher-newsletter/package.json
+# The server manifest, not the root one: Config reads service.version from it.
+COPY feedwatcher-newsletter-server/package.json /opt/app/feedwatcher-newsletter/package.json
 
 WORKDIR /opt/app/feedwatcher-newsletter
 

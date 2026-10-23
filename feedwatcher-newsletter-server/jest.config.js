@@ -24,4 +24,8 @@ module.exports = {
   transformIgnorePatterns: [],
   testMatch: ["/**/src/**/*.spec.(ts|js)"],
   testEnvironment: "node",
+  collectCoverageFrom: ["src/**/*.ts", "!src/**/*.spec.ts"],
+  coverageThreshold: {
+    global: { statements: 90, branches: 80, functions: 90, lines: 90 },
+  },
 };
