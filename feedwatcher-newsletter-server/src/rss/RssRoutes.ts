@@ -1,4 +1,4 @@
-import { FastifyInstance, FastifyRequest } from "fastify";
+import { FastifyInstance } from "fastify";
 import { Span } from "@opentelemetry/sdk-trace-base";
 import {
   OTelLogger,
@@ -7,46 +7,17 @@ import {
 } from "../OTelContext";
 import { Config } from "../Config";
 import {
-  EmailFeedsListAll,
   EmailsDataGetFeedLastModified,
   EmailsDataGetLastModified,
-  FeedSummary,
 } from "../emails/EmailsData";
-import {
-  FeedIdentityGetFeedUrlId,
-  FeedIdentityResolveFeedUrlId,
-} from "../feeds/FeedIdentity";
+import { FeedIdentityResolveFeedUrlId } from "../feeds/FeedIdentity";
+import { FeedListingGetBaseUrl, FeedListingGetFeeds } from "../feeds/FeedListing";
 import { OpmlGeneratorBuild } from "../feeds/OpmlGenerator";
 import { RssFeedGeneratorBuildFeedById } from "../emails/RssFeedGenerator";
 import { HttpConditionalSend } from "./HttpConditional";
 import { renderFeedsIndexPage } from "./HtmlPages";
 
 const logger = OTelLogger().createModuleLogger("RssRoutes");
-
-// Feed URLs use PUBLIC_URL when configured, otherwise the incoming request.
-// request.host includes the port; request.protocol/request.host honour
-// X-Forwarded-* only when Fastify trustProxy (TRUST_PROXY) is enabled. Without
-// PUBLIC_URL the Host header is client-controlled (link poisoning).
-function getBaseUrl(config: Config, request: FastifyRequest): string {
-  const configured = (config.PUBLIC_URL || "").trim().replace(/\/+$/, "");
-  return configured || `${request.protocol}://${request.host}`;
-}
-
-interface FeedListEntry extends FeedSummary {
-  feedUrl: string;
-}
-
-function getFeedsWithUrls(config: Config, request: FastifyRequest): {
-  feeds: FeedListEntry[];
-  baseUrl: string;
-} {
-  const baseUrl = getBaseUrl(config, request);
-  const feeds = EmailFeedsListAll().map((feed) => ({
-    ...feed,
-    feedUrl: `${baseUrl}/rss/${FeedIdentityGetFeedUrlId(feed.feedId)}`,
-  }));
-  return { feeds, baseUrl };
-}
 
 export class RssRoutes {
   constructor(private config: Config) {}
@@ -57,7 +28,7 @@ export class RssRoutes {
     // representations answer conditional requests and vary on Accept.
     fastify.get("/", async (request, reply) =>
       OTelRunWithRequestContext(request, async () => {
-        const { feeds } = getFeedsWithUrls(this.config, request);
+        const { feeds } = FeedListingGetFeeds(this.config, request);
         const accept = request.headers.accept || "";
         const lastModifiedMs = EmailsDataGetLastModified();
         if (accept.includes("text/html")) {
@@ -81,8 +52,12 @@ export class RssRoutes {
           body: JSON.stringify(
             feeds.map((f) => ({
               id: f.feedId,
+              feedId: f.feedId,
+              title: f.title,
               senderName: f.senderName,
               senderEmail: f.senderEmail,
+              itemCount: f.itemCount,
+              latestDate: f.latestDate,
               feedUrl: f.feedUrl,
             })),
           ),
@@ -93,11 +68,11 @@ export class RssRoutes {
       }),
     );
 
-    // OPML 2.0 export: one outline per feed, importable into FeedWatcher
-    // and most RSS readers.
+    // OPML 2.0 export: one outline per feed, grouped under a Newsletters
+    // folder, importable into FeedWatcher and most RSS readers.
     fastify.get("/opml", async (request, reply) =>
       OTelRunWithRequestContext(request, async () => {
-        const { feeds, baseUrl } = getFeedsWithUrls(this.config, request);
+        const { feeds, baseUrl } = FeedListingGetFeeds(this.config, request);
         const lastModifiedMs = EmailsDataGetLastModified();
         const xml = OpmlGeneratorBuild(
           "FeedWatcher Newsletter feeds",
@@ -126,12 +101,13 @@ export class RssRoutes {
         const { id } = request.params;
         const resolved = FeedIdentityResolveFeedUrlId(id);
         if (!resolved.valid) {
-          logger.info(`Invalid feed token for id: ${id}`, span);
+          // Never log the URL id: it may carry a feed token.
+          logger.info(`Invalid feed token for feed: ${resolved.feedId}`, span);
           reply.code(404);
           return reply.send({ error: "Feed not found" });
         }
 
-        const baseUrl = getBaseUrl(this.config, request);
+        const baseUrl = FeedListingGetBaseUrl(this.config, request);
         const xml = RssFeedGeneratorBuildFeedById(
           span,
           resolved.feedId,

@@ -143,16 +143,54 @@ describe("feed listing routes", () => {
     expect(response.statusCode).toBe(200);
     const feeds = response.json() as {
       id: string;
+      feedId: string;
+      title: string;
       senderName: string;
       senderEmail: string;
+      itemCount: number;
+      latestDate: string;
       feedUrl: string;
     }[];
     expect(feeds.map((feed) => feed.id).sort()).toEqual([
       "morningbrew",
       "thedaily",
     ]);
+    expect(Object.keys(feeds[0]).sort()).toEqual([
+      "feedId",
+      "feedUrl",
+      "id",
+      "itemCount",
+      "latestDate",
+      "senderEmail",
+      "senderName",
+      "title",
+    ]);
+    const daily = feeds.find((feed) => feed.feedId === "thedaily");
+    expect(daily?.id).toBe("thedaily");
+    expect(daily?.title).toBe("The Daily");
+    expect(daily?.itemCount).toBe(3);
+    expect(daily?.latestDate).toBe("2026-10-16T08:00:00.000Z");
     expect(feeds.every((feed) => feed.feedUrl.includes("/rss/"))).toBe(true);
     expect(response.body).not.toContain("billing@shop.com");
+  });
+
+  it("advertises every feed for reader autodiscovery", async () => {
+    const response = await build(makeConfig()).inject({
+      method: "GET",
+      url: "/rss/",
+      headers: { accept: "text/html" },
+    });
+    expect(response.statusCode).toBe(200);
+    const links =
+      response.body.match(/<link rel="alternate"[^>]*>/g) || [];
+    expect(links).toHaveLength(2);
+    expect(links.every((link) => link.includes('type="application/rss+xml"'))).toBe(
+      true,
+    );
+    expect(links.some((link) => link.includes('title="The Daily"'))).toBe(true);
+    expect(links.some((link) => link.includes("/rss/thedaily."))).toBe(true);
+    expect(links.some((link) => link.includes("/rss/morningbrew."))).toBe(true);
+    expect(response.headers["referrer-policy"]).toBe("no-referrer");
   });
 
   it("serves the OPML export without ignored senders", async () => {
@@ -162,9 +200,166 @@ describe("feed listing routes", () => {
     });
     expect(response.statusCode).toBe(200);
     expect(response.headers["content-type"]).toContain("text/x-opml");
+    expect(response.body).toContain('<outline text="Newsletters" title="Newsletters">');
     expect(response.body).toContain("<outline");
     expect(response.body).toContain("/rss/thedaily.");
     expect(response.body).not.toContain("Billing Team");
+    expect(response.body.indexOf('title="Morning Brew"')).toBeLessThan(
+      response.body.indexOf('title="The Daily"'),
+    );
+  });
+});
+
+describe("feed catalogue", () => {
+  it("serves the versioned catalogue with deterministic ordering and validators", async () => {
+    const response = await build(makeConfig()).inject({
+      method: "GET",
+      url: "/api/feeds",
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("application/json");
+
+    const catalogue = response.json() as {
+      version: number;
+      feeds: {
+        feedId: string;
+        title: string;
+        senderName: string;
+        senderEmail: string;
+        itemCount: number;
+        latestDate: string;
+        feedUrl: string;
+      }[];
+    };
+    expect(catalogue.version).toBe(1);
+    expect(catalogue.feeds.map((feed) => feed.feedId)).toEqual([
+      "morningbrew",
+      "thedaily",
+    ]);
+    for (const feed of catalogue.feeds) {
+      expect(Object.keys(feed).sort()).toEqual([
+        "feedId",
+        "feedUrl",
+        "itemCount",
+        "latestDate",
+        "senderEmail",
+        "senderName",
+        "title",
+      ]);
+      expect(feed.feedUrl).toContain(`/rss/${feed.feedId}.`);
+    }
+    const daily = catalogue.feeds.find((feed) => feed.feedId === "thedaily");
+    expect(daily?.title).toBe("The Daily");
+    expect(daily?.itemCount).toBe(3);
+    expect(daily?.latestDate).toBe("2026-10-16T08:00:00.000Z");
+    expect(response.body).not.toContain("Billing Team");
+    expect(response.body).not.toContain("billing@shop.com");
+
+    expect(response.headers.etag).toBeTruthy();
+    expect(response.headers["last-modified"]).toBeTruthy();
+    expect(response.headers["cache-control"]).toBe("private, no-cache");
+  });
+
+  it("serves bare feed URLs when private URLs are disabled", async () => {
+    initFeedIdentity({ privateUrls: false });
+    const response = await build(makeConfig()).inject({
+      method: "GET",
+      url: "/api/feeds",
+    });
+    expect(response.statusCode).toBe(200);
+    const catalogue = response.json() as {
+      feeds: { feedId: string; feedUrl: string }[];
+    };
+    const daily = catalogue.feeds.find((feed) => feed.feedId === "thedaily");
+    expect(daily?.feedUrl).toMatch(/\/rss\/thedaily$/);
+  });
+
+  it("honours PUBLIC_URL in the catalogue feed URLs", async () => {
+    const response = await build(
+      makeConfig({ PUBLIC_URL: "https://feeds.example.com/" }),
+    ).inject({ method: "GET", url: "/api/feeds" });
+    const catalogue = response.json() as { feeds: { feedUrl: string }[] };
+    expect(
+      catalogue.feeds.every((feed) =>
+        feed.feedUrl.startsWith("https://feeds.example.com/rss/"),
+      ),
+    ).toBe(true);
+  });
+});
+
+// Append mutates the store, so the conditional test needs its own store.
+describe("feed catalogue conditional requests", () => {
+  let isolatedDir: string;
+
+  beforeEach(() => {
+    isolatedDir = fs.mkdtempSync(path.join(os.tmpdir(), "appbuilder-catalogue-"));
+    EmailsDataInit(7, isolatedDir);
+    FeedIdentityInit({
+      ignoreList: "",
+      overrides: {},
+      privateUrls: false,
+      dataDir: isolatedDir,
+    });
+    EmailItemsBatchSave([
+      makeItem(),
+      makeItem({
+        id: BREW_ID,
+        messageId: "<brew-1@example.com>",
+        senderName: "Morning Brew",
+        senderEmail: "brew@morningbrew.com",
+        subject: "Brew issue",
+        body: "<p>Brew body</p>",
+      }),
+    ]);
+  });
+
+  afterEach(() => {
+    EmailsDataInit(7, dataDir);
+    initFeedIdentity();
+  });
+
+  it("answers 304 for both validators and changes the ETag after an append", async () => {
+    const fastify = build(makeConfig({ DATA_DIR: isolatedDir }));
+    const first = await fastify.inject({ method: "GET", url: "/api/feeds" });
+    expect(first.statusCode).toBe(200);
+    const etag = first.headers.etag as string;
+    const lastModified = first.headers["last-modified"] as string;
+    expect(etag).toMatch(/^".+"$/);
+    expect(lastModified).toBeTruthy();
+
+    const byEtag = await fastify.inject({
+      method: "GET",
+      url: "/api/feeds",
+      headers: { "if-none-match": etag },
+    });
+    expect(byEtag.statusCode).toBe(304);
+    expect(byEtag.body).toBe("");
+    expect(byEtag.headers.etag).toBe(etag);
+    expect(byEtag.headers["last-modified"]).toBe(lastModified);
+
+    const byDate = await fastify.inject({
+      method: "GET",
+      url: "/api/feeds",
+      headers: { "if-modified-since": lastModified },
+    });
+    expect(byDate.statusCode).toBe(304);
+    expect(byDate.body).toBe("");
+
+    EmailItemsBatchSave([
+      makeItem({
+        id: "99999999-9999-4999-8999-999999999999",
+        messageId: "<daily-new@example.com>",
+        subject: "Fresh daily issue",
+        dateReceived: new Date().toISOString(),
+      }),
+    ]);
+    const changed = await fastify.inject({
+      method: "GET",
+      url: "/api/feeds",
+      headers: { "if-none-match": etag },
+    });
+    expect(changed.statusCode).toBe(200);
+    expect(changed.headers.etag).not.toBe(etag);
   });
 });
 
@@ -296,7 +491,14 @@ describe("authentication", () => {
     const config = makeConfig({ AUTH_PASSWORD: "s3cret" });
     const fastify = build(config);
     const urlId = FeedIdentityGetFeedUrlId("thedaily");
-    const paths = ["/", "/rss/", "/rss/opml", `/rss/${urlId}`, `/view/${DAILY_ID}`];
+    const paths = [
+      "/",
+      "/rss/",
+      "/rss/opml",
+      `/rss/${urlId}`,
+      `/view/${DAILY_ID}`,
+      "/api/feeds",
+    ];
 
     for (const url of paths) {
       const missing = await fastify.inject({ method: "GET", url });
@@ -764,6 +966,7 @@ describe("journal independence at the route level", () => {
         "/rss/opml",
         "/rss/thedaily",
         `/view/${DAILY_ID}`,
+        "/api/feeds",
       ];
       for (const url of urls) {
         const response = await fastify.inject({ method: "GET", url });
@@ -862,6 +1065,7 @@ describe("security headers", () => {
       "/rss/",
       "/rss/opml",
       `/rss/${FeedIdentityGetFeedUrlId("thedaily")}`,
+      "/api/feeds",
       "/api/status",
     ];
     for (const url of urls) {
