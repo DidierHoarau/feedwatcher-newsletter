@@ -8,6 +8,7 @@ import { SecurityHeadersRegisterHook } from "./rss/SecurityHeaders";
 import { ViewRoutes } from "./rss/ViewRoutes";
 import { AccessControlRegisterHook } from "./security/AccessControl";
 import { ServerStatusGet } from "./ServerStatus";
+import { FeedCatalogueRoutes } from "./feeds/FeedCatalogueRoutes";
 
 export function buildApp(config: Config): FastifyInstance {
   const fastify = Fastify({ trustProxy: config.TRUST_PROXY });
@@ -33,12 +34,14 @@ export function buildApp(config: Config): FastifyInstance {
   fastify.get("/api/status", async () => ServerStatusGet());
 
   // The access-control hook is registered on this encapsulated scope, so it
-  // protects /, /rss/* and /view/* while /api/status stays open for probes.
+  // protects /, /rss/*, /view/* and /api/feeds while /api/status stays open
+  // for probes.
   fastify.register(async (scope) => {
     AccessControlRegisterHook(scope, config);
     scope.get("/", async (_request, reply) => reply.redirect("/rss/"));
     scope.register(new ViewRoutes(config).getRoutes);
     scope.register(new RssRoutes(config).getRoutes, { prefix: "/rss" });
+    scope.register(new FeedCatalogueRoutes(config).getRoutes);
   });
 
   return fastify;

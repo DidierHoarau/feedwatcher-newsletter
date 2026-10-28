@@ -114,6 +114,41 @@ describe("EmailFeedsListAll", () => {
     expect(feeds[0].title).toBe("SCMP");
   });
 
+  it("orders feeds by title with a feedId tie-break", () => {
+    FeedIdentityInit({
+      ignoreList: "",
+      overrides: {
+        "alpha@example.com": { feedId: "m", title: "Alpha" },
+        "same-a@example.com": { feedId: "a", title: "Same" },
+        "same-z@example.com": { feedId: "z", title: "Same" },
+      },
+      privateUrls: false,
+      dataDir,
+    });
+    EmailItemsBatchSave([
+      makeItem({
+        messageId: "<z@example.com>",
+        senderName: "Sender Z",
+        senderEmail: "same-z@example.com",
+      }),
+      makeItem({
+        messageId: "<m@example.com>",
+        senderName: "Sender M",
+        senderEmail: "alpha@example.com",
+      }),
+      makeItem({
+        messageId: "<a@example.com>",
+        senderName: "Sender A",
+        senderEmail: "same-a@example.com",
+      }),
+    ]);
+    expect(EmailFeedsListAll().map((feed) => [feed.title, feed.feedId])).toEqual([
+      ["Alpha", "m"],
+      ["Same", "a"],
+      ["Same", "z"],
+    ]);
+  });
+
   it("skips unknown senders and ignored senders", () => {
     FeedIdentityInit({
       ignoreList: "billing",

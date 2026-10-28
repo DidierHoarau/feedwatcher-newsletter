@@ -121,6 +121,16 @@ export const COPY_SCRIPT = `
 `;
 
 export function renderFeedsIndexPage(feeds: FeedForIndex[]): string {
+  // Reader autodiscovery: one alternate link per feed. Attribute values are
+  // escaped because titles come from sender names and override configuration.
+  const discoveryLinks = feeds
+    .map(
+      (feed) =>
+        `<link rel="alternate" type="application/rss+xml" title="${escapeHtml(
+          feed.title,
+        )}" href="${escapeHtml(feed.feedUrl)}"/>`,
+    )
+    .join("\n");
   const items = feeds
     .map(
       (feed) => `
@@ -140,6 +150,7 @@ export function renderFeedsIndexPage(feeds: FeedForIndex[]): string {
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>FeedWatcher Newsletter — Feeds</title>
+${discoveryLinks}
 <style>${SHARED_CSS}</style>
 </head>
 <body>

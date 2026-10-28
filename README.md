@@ -8,7 +8,7 @@ This project is a server-only companion to FeedWatcher. It has no UI and require
 
 One RSS feed is generated per unique sender name. Each feed's items are the email bodies (HTML preferred, plain text fallback) from that sender, ordered by date received.
 
-Email bodies are sanitized when served (scripts, event handlers, dangerous URLs and tracking pixels are stripped), each item links to a readable web view of the email, and feeds advertise near-real-time ingestion via IMAP IDLE with the cron schedule as fallback. Feed URLs can carry a per-feed token, senders can be ignored or renamed via configuration, and all feeds can be imported anywhere through OPML export. Tokenized URLs only obfuscate feed addresses; the service has no authentication by default — see [Security and privacy](#security-and-privacy).
+Email bodies are sanitized when served (scripts, event handlers, dangerous URLs and tracking pixels are stripped), each item links to a readable web view of the email, and feeds advertise near-real-time ingestion via IMAP IDLE with the cron schedule as fallback. Feed URLs can carry a per-feed token, senders can be ignored or renamed via configuration, and all feeds are discoverable through the versioned JSON catalogue (`/api/feeds`), advertised for reader autodiscovery on the index page, and importable anywhere through OPML export. Tokenized URLs only obfuscate feed addresses; the service has no authentication by default — see [Security and privacy](#security-and-privacy).
 
 # Deployment
 
@@ -101,9 +101,9 @@ spec:
 
 # Security and privacy
 
-By default the service has **no authentication**: anyone who can reach the host can list the feeds (`/rss/` HTML index and JSON list), fetch any feed and open any email at `/view/:emailId`. `FEED_PRIVATE_URLS` only obfuscates feed URLs (`<feedId>.<token>`): the index and the OPML export publish those URLs to every caller, and bare feed ids keep working unless strict private mode is enabled. Treat tokenized URLs as a convenience, not as access control. `SENDER_IGNORE_LIST` is enforced on every read path, so ignored senders are never listed and their feeds and permalinks are never served.
+By default the service has **no authentication**: anyone who can reach the host can list the feeds (`/api/feeds` catalogue, `/rss/` HTML index and JSON list), fetch any feed and open any email at `/view/:emailId`. `FEED_PRIVATE_URLS` only obfuscates feed URLs (`<feedId>.<token>`): the index, the catalogue and the OPML export publish those URLs to every caller, and bare feed ids keep working unless strict private mode is enabled. Treat tokenized URLs as a convenience, not as access control. `SENDER_IGNORE_LIST` is enforced on every read path, so ignored senders are never listed and their feeds and permalinks are never served.
 
-IMAP connections verify the server certificate by default (see [IMAP](#imap)). HTML pages are served with a Content-Security-Policy (hash-based for the inline copy script, so ETag/304 caching still works) and every response carries `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and a restrictive `Permissions-Policy`. RSS, JSON and OPML payloads get the same baseline headers without the CSP.
+IMAP connections verify the server certificate by default (see [IMAP](#imap)). HTML pages are served with a Content-Security-Policy (hash-based for the inline copy script, so ETag/304 caching still works) and every response carries `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and a restrictive `Permissions-Policy`. RSS, JSON, catalogue and OPML payloads get the same baseline headers without the CSP; the global `no-referrer` policy prevents feed tokens from leaking through referrers when readers follow the autodiscovery links.
 
 ## Dependency audit
 
@@ -111,7 +111,7 @@ IMAP connections verify the server certificate by default (see [IMAP](#imap)). H
 
 ## HTTP Basic authentication (optional)
 
-Set `AUTH_PASSWORD` (and optionally `AUTH_USERNAME`, default `feedwatcher`) to require HTTP Basic credentials on `/`, `/rss/*` and `/view/*`. `/api/status` stays open for readiness probes. Authentication is disabled while `AUTH_PASSWORD` is empty, so an unchanged deployment keeps serving existing subscribers. Configure every feed reader (and browser) with the same credentials, and only send them over HTTPS. The password is registered as sensitive and masked in configuration logs; `AUTH_USERNAME` and `AUTH_PASSWORD` are applied on hot configuration reload.
+Set `AUTH_PASSWORD` (and optionally `AUTH_USERNAME`, default `feedwatcher`) to require HTTP Basic credentials on `/`, `/rss/*`, `/view/*` and `/api/feeds`. `/api/status` stays open for readiness probes. Authentication is disabled while `AUTH_PASSWORD` is empty, so an unchanged deployment keeps serving existing subscribers. Configure every feed reader (and browser) with the same credentials, and only send them over HTTPS. The password is registered as sensitive and masked in configuration logs; `AUTH_USERNAME` and `AUTH_PASSWORD` are applied on hot configuration reload.
 
 ## Strict private mode (optional)
 
@@ -119,7 +119,7 @@ With `FEED_PRIVATE_URLS=true` and `FEED_PRIVATE_URLS_STRICT=true`, requests usin
 
 ## Feed URLs and proxies
 
-`PUBLIC_URL` is authoritative for the URLs advertised by the index, the OPML export and the feed metadata. When it is empty, URLs are derived from the request: the `Host` header including its port, and the request protocol. Without `PUBLIC_URL` the `Host` header is client-controlled, so a caller can poison the URLs it receives. Behind a trusted reverse proxy, set `TRUST_PROXY=true` (restart-only) so `X-Forwarded-Proto`/`X-Forwarded-Host` are used; leave it `false` otherwise.
+`PUBLIC_URL` is authoritative for the URLs advertised by the index, the `/api/feeds` catalogue, the OPML export and the feed metadata. When it is empty, URLs are derived from the request: the `Host` header including its port, and the request protocol. Without `PUBLIC_URL` the `Host` header is client-controlled, so a caller can poison the URLs it receives. Behind a trusted reverse proxy, set `TRUST_PROXY=true` (restart-only) so `X-Forwarded-Proto`/`X-Forwarded-Host` are used; leave it `false` otherwise.
 
 # Configuration
 
@@ -204,7 +204,7 @@ When authentication is enabled (non-empty `AUTH_PASSWORD`), every endpoint excep
 
 - **In-memory index.** `emails.jsonl` remains the single source of truth, but it is parsed once at startup into an in-memory index (current record per message id, item id → record, journal record counts). Appends and purges update the index write-through and feed grouping is derived lazily in memory, so `/rss/`, `/rss/opml` and `/rss/:id` never read the journal during a request. An unreadable journal fails the startup instead of silently serving empty feeds. Memory follows the journal size: a ~96 MB journal indexes to roughly 340 MB RSS after startup.
 - **Sanitized-body cache.** Sanitized HTML and its plain-text summary are cached per item id and sanitizer configuration in a bounded LRU of 32 MiB (accounted as raw UTF-16 size, evicted on purge and reset at startup). Feed builds and `/view/:emailId` share the cache, so a body is sanitized once per configuration instead of on every poll.
-- **Conditional requests.** `/rss/` (JSON and HTML), `/rss/opml` and `/rss/:id` return a strong `ETag` (content hash) and `Last-Modified`, both invalidated by append, purge and feed-identity changes, and answer `If-None-Match`/`If-Modified-Since` with `304 Not Modified`. `/rss/` also sends `Vary: Accept`.
+- **Conditional requests.** `/rss/` (JSON and HTML), `/rss/opml`, `/rss/:id` and `/api/feeds` return a strong `ETag` (content hash) and `Last-Modified`, both invalidated by append, purge and feed-identity changes, and answer `If-None-Match`/`If-Modified-Since` with `304 Not Modified`. `/rss/` also sends `Vary: Accept`.
 - **Compression.** gzip, brotli and deflate are negotiated for `/rss/*` and the HTML pages; responses below 1 KiB stay identity-encoded, and a request without `Accept-Encoding` gets the identity representation (`Vary: Accept-Encoding`).
 - **Benchmark.** `feedwatcher-newsletter-server/docs/bench/feed-serving-benchmark.ts` regenerates a synthetic journal (default: 1,000 records / ~96 MB / 50 feeds) and reports per-endpoint cold and warm latency plus RSS. Run it from `feedwatcher-newsletter-server/` with `npx tsx docs/bench/feed-serving-benchmark.ts --out after.json`; the measured before/after is in `docs/bench/README.md`.
 
@@ -224,7 +224,7 @@ When authentication is enabled (non-empty `AUTH_PASSWORD`), every endpoint excep
 | `OPENTELEMETRY_COLLECTOR_AWS`                             | Enable AWS OTel collector                   | `false` |
 | `OPENTELEMETRY_COLLECT_AUTHORIZATION_HEADER`              | Authorization header for the OTel collector |         |
 
-Tracing covers the product routes: `/`, `/rss/*` and `/view/*` produce an HTTP server span (`GET-<route>`), and each feed build runs inside it as a `RssFeedGeneratorBuildFeedById` child span. Requests that match no route are named by their method (`GET`) to keep span-name cardinality bounded. `/api/status` is excluded from tracing because the readiness probe pollutes the trace list with it. The service emits **no metrics**: the Fastify hooks are registered without a meter.
+Tracing covers the product routes: `/`, `/rss/*`, `/view/*` and `/api/feeds` produce an HTTP server span (`GET-<route>`), and each feed build runs inside it as a `RssFeedGeneratorBuildFeedById` child span. Requests that match no route are named by their method (`GET`) to keep span-name cardinality bounded. `/api/status` is excluded from tracing because the readiness probe pollutes the trace list with it. The service emits **no metrics**: the Fastify hooks are registered without a meter.
 
 `service.version` is read from `feedwatcher-newsletter-server/package.json` (the runtime image ships that manifest), so traces, logs and metrics identify the application version rather than the installed shared library version. An explicit `VERSION` environment variable or config file value still overrides it.
 
@@ -234,30 +234,75 @@ When authentication is enabled (`AUTH_PASSWORD` non-empty), every endpoint below
 
 | Method | Path              | Description                                              |
 | ------ | ----------------- | -------------------------------------------------------- |
-| `GET`  | `/rss/`           | List all available RSS feeds — HTML index page for browsers, JSON array for API clients |
-| `GET`  | `/rss/opml`       | OPML 2.0 export of all feeds (importable into FeedWatcher and most RSS readers) |
+| `GET`  | `/api/feeds`      | Versioned JSON feed catalogue — the stable contract for readers (see [Feed catalogue](#feed-catalogue-apifeeds)); protected when authentication is enabled |
+| `GET`  | `/rss/`           | List all available RSS feeds — HTML index page (with reader autodiscovery links) for browsers, JSON array for API clients |
+| `GET`  | `/rss/opml`       | OPML 2.0 export of all feeds, grouped under a `Newsletters` folder (importable into FeedWatcher and most RSS readers) |
 | `GET`  | `/rss/:id`        | Get the RSS feed for a specific sender by sender ID; `404` for unknown feeds, invalid tokens and ignored senders |
 | `GET`  | `/view/:emailId`  | Readable web view of one email (the feed items' permalink target); `404` for unknown or ignored emails |
 | `GET`  | `/api/status`     | Unauthenticated readiness and ingestion health snapshot (see below); excluded from tracing |
 
 The sender ID is derived from the sender name by lowercasing it and removing all non-alphanumeric characters (e.g., `"The Daily Newsletter"` → `thedailynewsletter`). It can be overridden per sender with `FEED_OVERRIDES`.
 
-The feed list, the OPML export and every feed answer conditional requests: they carry an `ETag` and `Last-Modified` and return `304 Not Modified` for `If-None-Match`/`If-Modified-Since`, so pollers do not re-download unchanged feeds. Feed payloads and the HTML pages are compressed with gzip/brotli when the client advertises support; `Accept-Encoding`-less requests get the identity body. See [Performance and HTTP caching](#performance-and-http-caching).
+The feed list, the catalogue, the OPML export and every feed answer conditional requests: they carry an `ETag` and `Last-Modified` and return `304 Not Modified` for `If-None-Match`/`If-Modified-Since`, so pollers do not re-download unchanged feeds. Feed payloads and the HTML pages are compressed with gzip/brotli when the client advertises support; `Accept-Encoding`-less requests get the identity body. See [Performance and HTTP caching](#performance-and-http-caching).
 
-When `FEED_PRIVATE_URLS` is enabled (default), the list and the OPML export advertise feed URLs of the form `<feedId>.<randomToken>` (e.g. `thedailynewsletter.9f86d081884c7d65`), persisted in `DATA_DIR/feed-tokens.json`. Tokens are created only for existing feeds, are pruned at startup when their feed disappears, and an invalid token never creates an entry. Bare feed ids keep working so existing reader subscriptions are unaffected, unless `FEED_PRIVATE_URLS_STRICT=true` is set — then bare ids return `404` and only tokenized URLs are served.
+When `FEED_PRIVATE_URLS` is enabled (default), the catalogue, the list and the OPML export advertise feed URLs of the form `<feedId>.<randomToken>` (e.g. `thedailynewsletter.9f86d081884c7d65`), persisted in `DATA_DIR/feed-tokens.json`. Tokens are created only for existing feeds, are pruned at startup when their feed disappears, and an invalid token never creates an entry. Bare feed ids keep working so existing reader subscriptions are unaffected, unless `FEED_PRIVATE_URLS_STRICT=true` is set — then bare ids return `404` and only tokenized URLs are served.
 
-The JSON list response returns the following fields per sender:
+The `/rss/` JSON list keeps its legacy shape and additionally exposes the catalogue metadata; existing consumers are unaffected:
 
 ```json
 [
   {
     "id": "thedailynewsletter",
+    "feedId": "thedailynewsletter",
+    "title": "The Daily Newsletter",
     "senderName": "The Daily Newsletter",
     "senderEmail": "news@example.com",
+    "itemCount": 12,
+    "latestDate": "2026-10-16T08:00:00.000Z",
     "feedUrl": "https://feedwatcher-newsletter.example.com/rss/thedailynewsletter.9f86d081884c7d65"
   }
 ]
 ```
+
+The HTML index also advertises one `<link rel="alternate" type="application/rss+xml">` per feed, so a generic reader pointed at the root discovers every feed without parsing the page; the global `Referrer-Policy: no-referrer` keeps the tokenized URLs from leaking through referrers.
+
+## Feed catalogue (`/api/feeds`)
+
+`GET /api/feeds` is the stable, machine-readable contract for the offered feeds. It returns a versioned envelope:
+
+```json
+{
+  "version": 1,
+  "feeds": [
+    {
+      "feedId": "thedailynewsletter",
+      "title": "The Daily Newsletter",
+      "senderName": "The Daily Newsletter",
+      "senderEmail": "news@example.com",
+      "itemCount": 12,
+      "latestDate": "2026-10-16T08:00:00.000Z",
+      "feedUrl": "https://feedwatcher-newsletter.example.com/rss/thedailynewsletter.9f86d081884c7d65"
+    }
+  ]
+}
+```
+
+| Field         | Description |
+| ------------- | ----------- |
+| `version`     | Contract version, currently `1`. Additive fields keep the version; removals, renames and type changes bump it. |
+| `feedId`      | Stable key derived from the sender (or `FEED_OVERRIDES`); it does not change when a private token rotates. |
+| `title`       | Override-aware feed title, falling back to the sender name. |
+| `senderName` / `senderEmail` | Sender of the feed's latest retained email. |
+| `itemCount`   | Number of retained emails in the feed. |
+| `latestDate`  | `dateReceived` of the latest retained email, ISO-8601. |
+| `feedUrl`     | Currently advertised feed URL (`/rss/<feedId>` or `/rss/<feedId>.<token>`). |
+
+- **Ordering** is deterministic: `(title, feedId)`.
+- **Auth scope** matches `/rss/*`: with `AUTH_PASSWORD` set the endpoint returns `401` without Basic credentials.
+- **Conditional requests** are supported (`ETag`, `Last-Modified`, `304`, `Cache-Control: private, no-cache`).
+- **Consumers should key on `feedId`**, not on `feedUrl`: private URLs are capability URLs that may rotate, and `FEED_PRIVATE_URLS_STRICT=true` rejects bare ids. Refresh `feedUrl` from the catalogue instead of persisting it as the identity. Set `PUBLIC_URL` so catalogue URLs do not depend on the request `Host`.
+
+The full contract (fields, versioning rule, overrides, private-URL modes) is documented in [`feedwatcher-newsletter-server/docs/api/feeds-catalogue.md`](feedwatcher-newsletter-server/docs/api/feeds-catalogue.md).
 
 ## Status
 

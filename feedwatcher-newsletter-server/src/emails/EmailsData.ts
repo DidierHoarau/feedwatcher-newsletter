@@ -265,7 +265,9 @@ function buildFeedIndex(identityGeneration: number): FeedIndex {
       latestDate: latest.dateReceived,
     });
   }
-  summaries.sort((a, b) => a.title.localeCompare(b.title));
+  summaries.sort(
+    (a, b) => a.title.localeCompare(b.title) || a.feedId.localeCompare(b.feedId),
+  );
   return {
     identityGeneration,
     itemsByFeedId,
