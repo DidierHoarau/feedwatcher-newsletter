@@ -1,5 +1,5 @@
 import RSS from "rss";
-import { Span } from "@opentelemetry/sdk-trace-base";
+import { Span } from "@opentelemetry/api";
 import { OTelTracer } from "../OTelContext";
 import { FeedIdentityGetFeedUrlId, FeedIdentityGetTitle } from "../feeds/FeedIdentity";
 import { EmailItemsListById, EmailsDataGetFeedLastModified } from "./EmailsData";

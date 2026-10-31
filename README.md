@@ -140,7 +140,7 @@ Configuration values can be set via environment variables or through the `config
 | `IMAP_SOCKET_TIMEOUT_MS` | Socket inactivity timeout for fetch connections in milliseconds (`0` disables) | `120000` |
 | `IMAP_IDLE_SOCKET_TIMEOUT_MS` | Socket inactivity timeout for the IDLE connection in milliseconds; must exceed the 300 s IDLE keepalive (`0` disables) | `600000` |
 
-The IMAP server certificate is verified against the system CA store by default (`node:24-alpine` plus the `ca-certificates` package in the image). Keep verification enabled: `IMAP_TLS_INSECURE=true` is the only, deliberately loud, way to bypass it and should only be used temporarily for a server whose certificate cannot be fixed. TLS failures are logged with an actionable hint and never trigger a silent fallback to an unverified connection.
+The IMAP server certificate is verified against the system CA store by default (`node:26-alpine` plus the `ca-certificates` package in the image). Keep verification enabled: `IMAP_TLS_INSECURE=true` is the only, deliberately loud, way to bypass it and should only be used temporarily for a server whose certificate cannot be fixed. TLS failures are logged with an actionable hint and never trigger a silent fallback to an unverified connection.
 
 ## General
 

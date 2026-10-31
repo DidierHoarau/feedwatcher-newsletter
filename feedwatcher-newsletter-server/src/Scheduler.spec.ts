@@ -1,4 +1,4 @@
-import { Span } from "@opentelemetry/sdk-trace-base";
+import { Span } from "@opentelemetry/api";
 import * as schedule from "node-schedule";
 import { Config } from "./Config";
 import { SchedulerInit, SchedulerReload } from "./Scheduler";

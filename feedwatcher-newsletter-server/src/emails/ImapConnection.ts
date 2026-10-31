@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as tls from "tls";
 import { ImapFlowOptions } from "imapflow";
-import { Span } from "@opentelemetry/sdk-trace-base";
+import { Span } from "@opentelemetry/api";
 import { Config } from "../Config";
 import { OTelLogger } from "../OTelContext";
 
