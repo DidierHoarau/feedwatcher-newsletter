@@ -1,5 +1,5 @@
 # BUILD
-FROM node:24-alpine as builder
+FROM node:26-alpine as builder
 
 WORKDIR /opt/src
 
@@ -13,7 +13,7 @@ RUN cd feedwatcher-newsletter-server && \
     npm prune --omit=dev
 
 # RUN
-FROM node:24-alpine
+FROM node:26-alpine
 
 # TLS certificate verification is enabled by default for IMAP: the runtime
 # needs a CA bundle (not shipped by the base image) to validate public servers.

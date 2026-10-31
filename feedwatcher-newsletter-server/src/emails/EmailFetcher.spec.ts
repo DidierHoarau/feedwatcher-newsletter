@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as os from "os";
 import path from "path";
-import { Span } from "@opentelemetry/sdk-trace-base";
+import { Span } from "@opentelemetry/api";
 import { Config } from "../Config";
 import { EmailFetcherFetchEmails } from "./EmailFetcher";
 import {

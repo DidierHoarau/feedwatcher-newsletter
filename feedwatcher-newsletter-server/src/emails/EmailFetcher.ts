@@ -1,6 +1,6 @@
 import { ImapFlow, MailboxLockObject } from "imapflow";
 import { simpleParser } from "mailparser";
-import { Span } from "@opentelemetry/sdk-trace-base";
+import { Span } from "@opentelemetry/api";
 import { v4 as uuidv4 } from "uuid";
 import { Config } from "../Config";
 import { OTelLogger, OTelTracer } from "../OTelContext";
