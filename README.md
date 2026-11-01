@@ -15,9 +15,24 @@ Email bodies are sanitized when served (scripts, event handlers, dangerous URLs 
 FeedWatcher Newsletter is designed to be deployed as a container.
 
 - This image exposes port `8080`
-- The data volume is located at `/data`
-- The container runs as the unprivileged `node` user (uid 1000); `/data` must be writable by that user (the image creates and owns it by default)
+- `/data` (or `DATA_DIR`) is the service's only durable state and **must be a persistent volume**, not an `emptyDir` and not the container's writable layer
+- The container runs as the unprivileged `node` user (uid 1000); `/data` must be writable by that user (the image creates and owns it by default, and a mounted volume needs `fsGroup: 1000` or equivalent ownership)
 - The runtime image contains production dependencies only (`npm prune --omit=dev`) and ships the CA certificates required for IMAP TLS verification
+
+## Persistence
+
+`/data` holds all state the service needs across restarts:
+
+- `emails.jsonl`: the append-only email journal. It backs retention, message-id deduplication and the in-memory feed index.
+- `last-uid.json`: the IMAP resume marker (`{ "uid": ..., "uidvalidity": ... }`). A legacy `last-uid.txt` marker is imported once and left in place.
+- `feed-tokens.json`: the persisted `<feedId>.<token>` private feed URL tokens.
+
+Without a persistent volume, every container or pod restart starts from an empty directory and:
+
+- re-ingests the mailbox (bounded to `EMAIL_FETCH_RUN_BUDGET`, 2,000 emails per run), which is slow and rebuilds the index from scratch;
+- regenerates every feed token, so all advertised `<feedId>.<token>` URLs change and, with `FEED_PRIVATE_URLS_STRICT=true`, every existing reader subscription breaks until it is refreshed from `/api/feeds`.
+
+Use a host bind mount (Docker) or a `PersistentVolumeClaim` (Kubernetes), and never an `emptyDir` or an anonymous volume.
 
 ## Docker
 
@@ -33,9 +48,29 @@ docker run --name feedwatcher-newsletter \
   -d feedwatcher-newsletter
 ```
 
+The `-v "$(pwd)/data:/data"` mount is required, not optional: it keeps the journal, resume marker and feed tokens outside the container. Recreating the container without it re-ingests the mailbox and rotates every private feed token.
+
 ## Kubernetes
 
+The example uses a dedicated `ReadWriteOnce` PVC mounted at `/data` and a single replica. The volume is required for retention, deduplication and stable private feed URLs; see [Persistence](#persistence). If you already run FeedWatcher on a shared PVC, mount that claim with `subPath: newsletter` instead of creating a second claim, and create/chown that subdirectory for uid/gid 1000 (or use a dedicated claim with `fsGroup: 1000` as below). The claim uses the cluster's default StorageClass; set `storageClassName` if your cluster has none.
+
 ```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: feedwatcher-newsletter-data
+  labels:
+    app: feedwatcher-newsletter
+spec:
+  # ReadWriteOnce: the service has a single writer (append-only journal).
+  # Size the claim for EMAIL_RETENTION_DAYS and your mailbox volume; the
+  # benchmark journal is ~96 MB for 1,000 emails, so 1Gi covers a small setup.
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -43,6 +78,8 @@ metadata:
   labels:
     app: feedwatcher-newsletter
 spec:
+  # The volume is ReadWriteOnce and the journal has a single writer: never
+  # scale beyond one replica.
   replicas: 1
   selector:
     matchLabels:
@@ -52,9 +89,16 @@ spec:
       labels:
         app: feedwatcher-newsletter
     spec:
+      # The image runs as the unprivileged node user (uid/gid 1000). The mount
+      # hides the image's own /data, so fsGroup makes the volume writable.
+      securityContext:
+        fsGroup: 1000
       containers:
         - image: feedwatcher-newsletter
           name: feedwatcher-newsletter
+          ports:
+            - name: http
+              containerPort: 8080
           env:
             - name: IMAP_HOST
               valueFrom:
@@ -71,12 +115,17 @@ spec:
                 secretKeyRef:
                   name: feedwatcher-newsletter-secret
                   key: IMAP_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /data
           resources:
+            # The in-memory index needs ~340 MB RSS for a ~96 MB journal
+            # (~540 MB peak); 256Mi is below steady state.
             limits:
-              memory: 256Mi
+              memory: 1Gi
               cpu: 500m
             requests:
-              memory: 128Mi
+              memory: 256Mi
               cpu: 50m
           readinessProbe:
             httpGet:
@@ -85,6 +134,10 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: feedwatcher-newsletter-data
 ---
 apiVersion: v1
 kind: Service
@@ -98,6 +151,8 @@ spec:
   selector:
     app: feedwatcher-newsletter
 ```
+
+The 1Gi memory limit reflects the in-memory index: a ~96 MB journal indexes to roughly 340 MB RSS with a ~540 MB peak, so the previous 256Mi limit was below steady state; the 256Mi request is the steady-state baseline. Keep `replicas: 1`: the claim is ReadWriteOnce and the journal has a single writer, so multiple replicas would either fail to mount or duplicate ingestion.
 
 # Security and privacy
 
@@ -324,3 +379,5 @@ The full contract (fields, versioning rule, overrides, private-URL modes) is doc
 - `lastUid`/`uidvalidity` mirror the durable resume marker `DATA_DIR/last-uid.json`.
 - `recordCount` is the number of indexed emails (one per unique message id).
 - `idle.enabled` stays `true` while IMAP IDLE is running; `idle.connected` turns `false` while it is waiting to reconnect — a stall detector can compare both.
+
+`/api/status` only becomes reachable after `DATA_DIR` has been read and indexed, because the server loads the journal before it starts listening, so a successful probe never observes a half-built index. `lastSuccessfulFetchAt` stays `null` until the first fetch completes, which distinguishes "index ready, first fetch pending" from a completed first ingestion.
