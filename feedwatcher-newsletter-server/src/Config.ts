@@ -132,4 +132,22 @@ export class Config extends ConfigBase {
     this.addConfigField({ field: "FEED_OVERRIDES" });
     this.addConfigField({ field: "PUBLIC_URL" });
   }
+
+  // Hot reload: validate the whole configuration into a fresh instance and
+  // copy the declared fields onto this shared instance only when reload()
+  // succeeds, so a rejected value never leaves a partially applied config.
+  public async reloadAtomic(
+    logger?: (message: string) => void,
+  ): Promise<void> {
+    const staging = new Config();
+    await staging.reload(logger);
+    const stagingValues = staging as unknown as Record<string, unknown>;
+    const fields = (
+      staging as unknown as { _fields: Array<{ field: string }> }
+    )._fields;
+    for (const { field } of fields) {
+      (this as unknown as Record<string, unknown>)[field] =
+        stagingValues[field];
+    }
+  }
 }

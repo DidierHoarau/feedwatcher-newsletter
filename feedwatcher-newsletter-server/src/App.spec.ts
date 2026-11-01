@@ -25,6 +25,7 @@ jest.mock("./OTelContext", () => {
 jest.mock("./Config", () => {
   const instance = {
     reload: jest.fn().mockResolvedValue(undefined),
+    reloadAtomic: jest.fn().mockResolvedValue(undefined),
     API_PORT: 8080,
     CONFIG_FILE: "config.json",
   };
@@ -129,22 +130,115 @@ describe("startServer", () => {
     await fseState.watchCallback();
 
     expect(configMock.reload).toHaveBeenCalledTimes(1);
+    expect(configMock.reloadAtomic).not.toHaveBeenCalled();
     expect(schedulerMock.SchedulerReload).not.toHaveBeenCalled();
     expect(otelMock.__logger.warn).toHaveBeenCalledWith(
       expect.stringContaining("Ignoring config reload"),
     );
   });
 
-  it("reloads the configuration and reschedules when the file is valid", async () => {
+  it("reloads the configuration atomically and reschedules when the file is valid", async () => {
     await startServer();
     fseMock.readJson.mockResolvedValueOnce({});
 
     await fseState.watchCallback();
 
-    expect(configMock.reload).toHaveBeenCalledTimes(2);
+    expect(configMock.reload).toHaveBeenCalledTimes(1);
+    expect(configMock.reloadAtomic).toHaveBeenCalledTimes(1);
+    expect(schedulerMock.SchedulerReload).toHaveBeenCalledTimes(1);
     expect(schedulerMock.SchedulerReload).toHaveBeenCalledWith(configMock);
     expect(otelMock.__logger.info).toHaveBeenCalledWith(
       "Configuration reloaded and applied",
     );
+  });
+
+  it.each([
+    [
+      "a numeric field",
+      "Invalid numeric value for EMAIL_RETENTION_DAYS: \"not-a-number\" (a finite number is required)",
+      "EMAIL_RETENTION_DAYS",
+    ],
+    [
+      "a boolean field",
+      "Invalid boolean value for EMAIL_FETCH_IDLE: \"not-a-boolean\" (expected true/false, 1/0 or yes/no)",
+      "EMAIL_FETCH_IDLE",
+    ],
+    [
+      "an object field",
+      'Invalid JSON value for FEED_OVERRIDES: "not-json"',
+      "FEED_OVERRIDES",
+    ],
+  ])(
+    "keeps the process alive and the scheduler untouched when %s is invalid",
+    async (_label: string, message: string, field: string) => {
+      await startServer();
+      fseMock.readJson.mockResolvedValueOnce({});
+      configMock.reloadAtomic.mockRejectedValueOnce(new Error(message));
+
+      await expect(fseState.watchCallback()).resolves.toBeUndefined();
+
+      expect(schedulerMock.SchedulerReload).not.toHaveBeenCalled();
+      expect(otelMock.__logger.error).toHaveBeenCalledWith(
+        expect.stringContaining(field),
+        expect.any(Error),
+      );
+      expect(exitMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("logs a scheduler failure without rejecting the listener", async () => {
+    await startServer();
+    fseMock.readJson.mockResolvedValueOnce({});
+    schedulerMock.SchedulerReload.mockImplementationOnce(() => {
+      throw new Error("scheduler failure");
+    });
+
+    await expect(fseState.watchCallback()).resolves.toBeUndefined();
+
+    expect(otelMock.__logger.error).toHaveBeenCalledWith(
+      expect.stringContaining("scheduler update failed"),
+      expect.any(Error),
+    );
+    expect(exitMock).not.toHaveBeenCalled();
+  });
+
+  it("ignores overlapping watch events while a reload is in flight", async () => {
+    await startServer();
+    let resolveReload: () => void = () => undefined;
+    configMock.reloadAtomic.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveReload = resolve;
+        }),
+    );
+
+    const first = fseState.watchCallback();
+    const second = fseState.watchCallback();
+
+    await expect(second).resolves.toBeUndefined();
+    expect(schedulerMock.SchedulerReload).not.toHaveBeenCalled();
+
+    resolveReload();
+    await first;
+
+    expect(fseMock.readJson).toHaveBeenCalledTimes(1);
+    expect(configMock.reloadAtomic).toHaveBeenCalledTimes(1);
+    expect(schedulerMock.SchedulerReload).toHaveBeenCalledTimes(1);
+  });
+
+  it("resets the re-entrancy guard after a failed reload", async () => {
+    await startServer();
+    fseMock.readJson.mockResolvedValueOnce({});
+    configMock.reloadAtomic.mockRejectedValueOnce(
+      new Error("Invalid boolean value for EMAIL_FETCH_IDLE"),
+    );
+
+    await fseState.watchCallback();
+
+    fseMock.readJson.mockResolvedValueOnce({});
+    await fseState.watchCallback();
+
+    expect(configMock.reloadAtomic).toHaveBeenCalledTimes(2);
+    expect(schedulerMock.SchedulerReload).toHaveBeenCalledTimes(1);
   });
 });
