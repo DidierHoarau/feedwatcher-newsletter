@@ -33,11 +33,13 @@ export async function startServer(): Promise<void> {
     span.end();
   }
 
-  // Hot configuration reload. ConfigBase.reload falls back to the defaults
-  // when config.json is unreadable, so guard with a pre-parse: a missing or
-  // half-written file keeps the last valid in-memory configuration instead
-  // of resetting every file-based value. Registered after SchedulerInit so
-  // the scheduler state exists; re-entrancy guard against poll overlaps.
+  // Hot configuration reload. The file is re-read first: a missing or
+  // half-written file keeps the last valid in-memory configuration instead of
+  // resetting every file-based value. The reload itself is staged and atomic,
+  // so a semantically invalid value rejects the whole file and leaves the
+  // previous configuration untouched. Every error is caught and logged: the
+  // watcher must never reject. Registered after SchedulerInit so the
+  // scheduler state exists; re-entrancy guard against poll overlaps.
   let reloading = false;
   fse.watchFile(config.CONFIG_FILE, async () => {
     if (reloading) return;
@@ -51,10 +53,22 @@ export async function startServer(): Promise<void> {
         );
         return;
       }
+      await config.reloadAtomic((msg) => logger.info(msg));
       logger.info(`Config updated: ${config.CONFIG_FILE}`);
-      await config.reload((msg) => logger.info(msg));
-      SchedulerReload(config);
-      logger.info("Configuration reloaded and applied");
+      try {
+        SchedulerReload(config);
+        logger.info("Configuration reloaded and applied");
+      } catch (err) {
+        logger.error(
+          `Configuration reloaded but the scheduler update failed: ${(err as Error).message}`,
+          err as Error,
+        );
+      }
+    } catch (err) {
+      logger.error(
+        `Ignoring config reload: ${(err as Error).message}; keeping the last valid configuration`,
+        err as Error,
+      );
     } finally {
       reloading = false;
     }
