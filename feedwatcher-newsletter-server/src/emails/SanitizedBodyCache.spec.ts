@@ -54,6 +54,18 @@ describe("SanitizedBodyCacheGet", () => {
     expect(SanitizedBodyCacheStats().entries).toBe(2);
   });
 
+  it("keeps remote-image blocking as a distinct sanitizer configuration", () => {
+    const item = makeItem({
+      body: '<p>Hi</p><img src="https://cdn.example/hero.jpg" alt="Hero">',
+    });
+    const allowed = SanitizedBodyCacheGet(item, true, false);
+    const blocked = SanitizedBodyCacheGet(item, true, true);
+    expect(allowed.html).toContain("cdn.example");
+    expect(blocked.html).not.toContain("cdn.example");
+    expect(blocked.html).toContain('alt="Hero"');
+    expect(SanitizedBodyCacheStats().entries).toBe(2);
+  });
+
   it("serves a re-sanitized body for a re-saved message with a new item id", () => {
     const original = SanitizedBodyCacheGet(
       makeItem({ body: "<p>Sensitive</p>" }),
@@ -100,11 +112,14 @@ describe("SanitizedBodyCache bounds", () => {
 describe("SanitizedBodyCacheEvict and Reset", () => {
   it("evicts every configuration of the given items", () => {
     const item = makeItem();
-    SanitizedBodyCacheGet(item, true);
-    SanitizedBodyCacheGet(item, false);
+    SanitizedBodyCacheGet(item, true, false);
+    SanitizedBodyCacheGet(item, false, false);
+    SanitizedBodyCacheGet(item, true, true);
+    SanitizedBodyCacheGet(item, false, true);
     SanitizedBodyCacheGet(
       makeItem({ id: "33333333-3333-4333-8333-333333333333" }),
     );
+    expect(SanitizedBodyCacheStats().entries).toBe(5);
     SanitizedBodyCacheEvict([item.id]);
     expect(SanitizedBodyCacheStats().entries).toBe(1);
   });

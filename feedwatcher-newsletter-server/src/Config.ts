@@ -70,6 +70,11 @@ export class Config extends ConfigBase {
   // dimension <= 1) from email bodies
   public EMAIL_STRIP_TRACKING_PIXELS = true;
 
+  // Privacy: replace remote (http/https) image sources with an inert
+  // placeholder so newsletters cannot track the reader's IP/timing. Off by
+  // default because images no longer render.
+  public EMAIL_BLOCK_REMOTE_IMAGES = false;
+
   // Privacy: advertise and emit unguessable feed URLs (<feedId>.<token>);
   // bare feed ids keep working unless strict mode is enabled
   public FEED_PRIVATE_URLS = true;
@@ -123,6 +128,7 @@ export class Config extends ConfigBase {
     this.addConfigField({ field: "EMAIL_FETCH_DEADLINE_MS" });
     this.addConfigField({ field: "EMAIL_FETCH_IDLE" });
     this.addConfigField({ field: "EMAIL_STRIP_TRACKING_PIXELS" });
+    this.addConfigField({ field: "EMAIL_BLOCK_REMOTE_IMAGES" });
     this.addConfigField({ field: "FEED_PRIVATE_URLS" });
     this.addConfigField({ field: "FEED_PRIVATE_URLS_STRICT" });
     this.addConfigField({ field: "AUTH_USERNAME" });

@@ -9,7 +9,7 @@ import type { EmailItem } from "./EmailFetcher";
 export const SANITIZED_BODY_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 
 // Bump whenever the sanitizer options change so stale entries are never served.
-const CACHE_KEY_VERSION = 1;
+const CACHE_KEY_VERSION = 2;
 
 export interface SanitizedBody {
   html: string;
@@ -26,8 +26,14 @@ let cachedBytes = 0;
 // Item id, not messageId: a re-saved message keeps its messageId but carries a
 // new body and item id. The sanitizer configuration is part of the key, so
 // different configurations never share entries.
-function cacheKeyFor(itemId: string, stripTrackingPixels: boolean): string {
-  return `${CACHE_KEY_VERSION}|${stripTrackingPixels ? "strip" : "keep"}|${itemId}`;
+function cacheKeyFor(
+  itemId: string,
+  stripTrackingPixels: boolean,
+  blockRemoteImages: boolean,
+): string {
+  return `${CACHE_KEY_VERSION}|${stripTrackingPixels ? "strip" : "keep"}|${
+    blockRemoteImages ? "block" : "allow"
+  }|${itemId}`;
 }
 
 function evictOldest(): void {
@@ -43,8 +49,9 @@ function evictOldest(): void {
 export function SanitizedBodyCacheGet(
   item: EmailItem,
   stripTrackingPixels = true,
+  blockRemoteImages = false,
 ): SanitizedBody {
-  const key = cacheKeyFor(item.id, stripTrackingPixels);
+  const key = cacheKeyFor(item.id, stripTrackingPixels, blockRemoteImages);
   const existing = cache.get(key);
   if (existing) {
     // Map iteration order is insertion order: re-insert on hit to keep the
@@ -53,7 +60,11 @@ export function SanitizedBodyCacheGet(
     cache.set(key, existing);
     return existing;
   }
-  const html = HtmlSanitizerSanitize(item.body, stripTrackingPixels);
+  const html = HtmlSanitizerSanitize(
+    item.body,
+    stripTrackingPixels,
+    blockRemoteImages,
+  );
   const summary = HtmlSanitizerGetTextSummary(html);
   const entry: CacheEntry = {
     html,
@@ -71,11 +82,13 @@ export function SanitizedBodyCacheGet(
 export function SanitizedBodyCacheEvict(itemIds: Iterable<string>): void {
   for (const itemId of itemIds) {
     for (const strip of [true, false]) {
-      const key = cacheKeyFor(itemId, strip);
-      const entry = cache.get(key);
-      if (entry) {
-        cache.delete(key);
-        cachedBytes -= entry.bytes;
+      for (const block of [true, false]) {
+        const key = cacheKeyFor(itemId, strip, block);
+        const entry = cache.get(key);
+        if (entry) {
+          cache.delete(key);
+          cachedBytes -= entry.bytes;
+        }
       }
     }
   }

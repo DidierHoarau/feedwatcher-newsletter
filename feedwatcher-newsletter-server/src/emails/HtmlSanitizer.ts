@@ -4,6 +4,7 @@ const SUMMARY_MAX_LENGTH = 500;
 
 function buildSanitizeOptions(
   stripTrackingPixels: boolean,
+  blockRemoteImages: boolean,
 ): sanitizeHtml.IOptions {
   return {
     // img is not in the sanitize-html defaults but newsletter bodies need it
@@ -25,6 +26,8 @@ function buildSanitizeOptions(
     allowProtocolRelative: false,
     transformTags: {
       a: sanitizeHtml.simpleTransform("a", { target: "_blank", rel: "noopener noreferrer nofollow" }),
+      img: (tagName, attribs) =>
+        blockRemoteImages ? blockRemoteImageSource(tagName, attribs) : { tagName, attribs },
     },
     exclusiveFilter: (frame) => {
       if (!stripTrackingPixels || frame.tag !== "img") {
@@ -45,6 +48,27 @@ function buildSanitizeOptions(
       );
     },
   };
+}
+
+// Privacy: remove the source of remote images so the reader's browser never
+// contacts the sender. The image stays in place (with its layout attributes
+// and alt/title) so the newsletter structure is preserved; relative and
+// already-disallowed sources are left to the regular sanitizer.
+function blockRemoteImageSource(
+  tagName: string,
+  attribs: Record<string, string>,
+): { tagName: string; attribs: Record<string, string> } {
+  const src = (attribs.src || "").trim().toLowerCase();
+  const isRemote =
+    src.startsWith("http://") || src.startsWith("https://") || src.startsWith("//");
+  if (!isRemote) {
+    return { tagName, attribs };
+  }
+  const { src: _src, ...rest } = attribs;
+  if (!rest.alt || rest.alt.trim() === "") {
+    rest.alt = "[remote image blocked]";
+  }
+  return { tagName, attribs: rest };
 }
 
 function dimensionFromAttribs(
@@ -69,13 +93,18 @@ function sizeFromStyle(style: string | undefined, property: string): number | un
 
 // Strip scripts, event handlers, dangerous URLs and tracking pixels while
 // keeping links, images and the regular newsletter layout tags. Tracking-pixel
-// stripping can be disabled per call (EMAIL_STRIP_TRACKING_PIXELS).
+// stripping can be disabled per call (EMAIL_STRIP_TRACKING_PIXELS); remote
+// image blocking is opt-in (EMAIL_BLOCK_REMOTE_IMAGES).
 export function HtmlSanitizerSanitize(
   html: string,
   stripTrackingPixels = true,
+  blockRemoteImages = false,
 ): string {
   if (!html) return "";
-  return sanitizeHtml(html, buildSanitizeOptions(stripTrackingPixels));
+  return sanitizeHtml(
+    html,
+    buildSanitizeOptions(stripTrackingPixels, blockRemoteImages),
+  );
 }
 
 // Plain-text summary of an HTML body, for the RSS <description> element.

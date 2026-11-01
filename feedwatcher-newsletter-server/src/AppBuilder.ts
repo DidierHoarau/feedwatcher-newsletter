@@ -9,6 +9,7 @@ import { ViewRoutes } from "./rss/ViewRoutes";
 import { AccessControlRegisterHook } from "./security/AccessControl";
 import { ServerStatusGet } from "./ServerStatus";
 import { FeedCatalogueRoutes } from "./feeds/FeedCatalogueRoutes";
+import { UrlPathRedactionRegisterHook } from "./UrlPathRedaction";
 
 export function buildApp(config: Config): FastifyInstance {
   const fastify = Fastify({ trustProxy: config.TRUST_PROXY });
@@ -30,6 +31,11 @@ export function buildApp(config: Config): FastifyInstance {
     ignoreList: ["GET-/api/status"],
     unmatchedRouteSpanName: "method",
   });
+
+  // The tracing library records the raw request path as url.path before this
+  // hook runs: overwrite it with the route template (or a redacted path) so a
+  // feed capability token never reaches the trace backend.
+  UrlPathRedactionRegisterHook(fastify);
 
   fastify.get("/api/status", async () => ServerStatusGet());
 

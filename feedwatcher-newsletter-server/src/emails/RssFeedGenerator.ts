@@ -12,6 +12,7 @@ export function RssFeedGeneratorBuildFeedById(
   id: string,
   baseUrl: string,
   stripTrackingPixels = true,
+  blockRemoteImages = false,
 ): string | undefined {
   const span = OTelTracer().startSpan("RssFeedGeneratorBuildFeedById", context);
   try {
@@ -39,7 +40,11 @@ export function RssFeedGeneratorBuildFeedById(
     });
 
     for (const email of emails) {
-      const sanitizedBody = SanitizedBodyCacheGet(email, stripTrackingPixels);
+      const sanitizedBody = SanitizedBodyCacheGet(
+        email,
+        stripTrackingPixels,
+        blockRemoteImages,
+      );
       feed.item({
         title: email.subject,
         description: sanitizedBody.summary,

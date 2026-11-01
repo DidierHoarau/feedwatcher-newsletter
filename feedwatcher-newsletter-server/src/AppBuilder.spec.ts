@@ -482,6 +482,84 @@ describe("view route", () => {
   });
 });
 
+describe("remote image blocking", () => {
+  let isolatedDir: string;
+  const REMOTE_ID = "77777777-7777-4777-8777-777777777777";
+  const REMOTE_IMAGE = "https://cdn.example/hero.jpg";
+
+  beforeEach(() => {
+    isolatedDir = fs.mkdtempSync(path.join(os.tmpdir(), "appbuilder-images-"));
+    EmailsDataInit(7, isolatedDir);
+    FeedIdentityInit({
+      ignoreList: "",
+      overrides: {},
+      privateUrls: false,
+      dataDir: isolatedDir,
+    });
+    EmailItemsBatchSave([
+      makeItem({
+        id: REMOTE_ID,
+        messageId: "<remote-1@example.com>",
+        subject: "Remote image issue",
+        body: `<p>Remote image body</p><img src="${REMOTE_IMAGE}" alt="Hero">`,
+      }),
+    ]);
+  });
+
+  afterEach(() => {
+    EmailsDataInit(7, dataDir);
+    initFeedIdentity();
+  });
+
+  it("keeps remote images by default in the feed and the view page", async () => {
+    const fastify = build(makeConfig({ DATA_DIR: isolatedDir }));
+    const view = await fastify.inject({
+      method: "GET",
+      url: `/view/${REMOTE_ID}`,
+    });
+    const feed = await fastify.inject({ method: "GET", url: "/rss/thedaily" });
+    expect(view.statusCode).toBe(200);
+    expect(feed.statusCode).toBe(200);
+    expect(view.body).toContain(REMOTE_IMAGE);
+    expect(feed.body).toContain(REMOTE_IMAGE);
+  });
+
+  it("blocks remote images in both representations when enabled", async () => {
+    const fastify = build(
+      makeConfig({ DATA_DIR: isolatedDir, EMAIL_BLOCK_REMOTE_IMAGES: true }),
+    );
+    const view = await fastify.inject({
+      method: "GET",
+      url: `/view/${REMOTE_ID}`,
+    });
+    const feed = await fastify.inject({ method: "GET", url: "/rss/thedaily" });
+    for (const response of [view, feed]) {
+      expect(response.statusCode).toBe(200);
+      expect(response.body).not.toContain("cdn.example");
+      expect(response.body).toContain('alt="Hero"');
+      expect(response.body).not.toMatch(/<img[^>]*\bsrc=/);
+    }
+  });
+
+  it("applies a live toggle without rebuilding the app", async () => {
+    const config = makeConfig({ DATA_DIR: isolatedDir });
+    const fastify = build(config);
+    expect(
+      (await fastify.inject({ method: "GET", url: `/view/${REMOTE_ID}` })).body,
+    ).toContain(REMOTE_IMAGE);
+
+    config.EMAIL_BLOCK_REMOTE_IMAGES = true;
+
+    const view = await fastify.inject({
+      method: "GET",
+      url: `/view/${REMOTE_ID}`,
+    });
+    const feed = await fastify.inject({ method: "GET", url: "/rss/thedaily" });
+    expect(view.body).not.toContain("cdn.example");
+    expect(feed.body).not.toContain("cdn.example");
+  });
+});
+
 describe("authentication", () => {
   it("is disabled by default and leaves /api/status open", async () => {
     const fastify = build(makeConfig());

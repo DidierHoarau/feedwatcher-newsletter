@@ -113,6 +113,7 @@ export class RssRoutes {
           resolved.feedId,
           baseUrl,
           this.config.EMAIL_STRIP_TRACKING_PIXELS,
+          this.config.EMAIL_BLOCK_REMOTE_IMAGES,
         );
         if (xml === undefined) {
           logger.info(`Unknown feed id: ${resolved.feedId}`, span);
