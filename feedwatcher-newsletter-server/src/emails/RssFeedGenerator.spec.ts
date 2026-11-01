@@ -115,6 +115,32 @@ describe("RssFeedGeneratorBuildFeedById", () => {
     expect(xml).toContain("tracker.example/keep");
   });
 
+  it("blocks remote images in content:encoded when enabled", () => {
+    EmailItemsBatchSave([
+      makeItem({
+        id: "66666666-6666-4666-8666-666666666666",
+        messageId: "<remote-image@example.com>",
+        body: '<p>Hi</p><img src="https://cdn.example/hero.jpg" alt="Hero">',
+      }),
+    ]);
+    const allowed = RssFeedGeneratorBuildFeedById(
+      OTelTracer().startSpan("test"),
+      "thedaily",
+      "https://svc.example.com",
+    ) as string;
+    expect(allowed).toContain("cdn.example/hero.jpg");
+
+    const blocked = RssFeedGeneratorBuildFeedById(
+      OTelTracer().startSpan("test"),
+      "thedaily",
+      "https://svc.example.com",
+      true,
+      true,
+    ) as string;
+    expect(blocked).not.toContain("cdn.example");
+    expect(blocked).toContain('alt="Hero"');
+  });
+
   it("builds byte-identical documents for unchanged data", () => {
     EmailItemsBatchSave([
       makeItem({

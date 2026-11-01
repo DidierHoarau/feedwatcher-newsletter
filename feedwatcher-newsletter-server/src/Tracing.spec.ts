@@ -16,6 +16,7 @@ interface RecordedSpan {
   name: string;
   parent?: unknown;
   options?: { kind?: SpanKind };
+  attributes: Record<string, unknown>;
   end: jest.Mock;
 }
 
@@ -25,12 +26,16 @@ let spans: RecordedSpan[];
 
 const startSpanMock = jest.fn(
   (name: string, parent?: unknown, options?: { kind?: SpanKind }) => {
-    const span = {
+    const span: RecordedSpan = {
       name,
       parent,
       options,
+      attributes: {},
       end: jest.fn(),
-      setAttribute: jest.fn(),
+      setAttribute: jest.fn((key: string, value: unknown) => {
+        span.attributes[key] = value;
+        return span;
+      }),
       setStatus: jest.fn(),
       recordException: jest.fn(),
       spanContext: () => ({
@@ -43,6 +48,10 @@ const startSpanMock = jest.fn(
     return span;
   },
 );
+
+function attributeValues(span: RecordedSpan): string[] {
+  return Object.values(span.attributes).map((value) => String(value));
+}
 
 function makeItem(overrides: Partial<EmailItem> = {}): EmailItem {
   return {
@@ -109,19 +118,21 @@ describe("HTTP span tracing", () => {
 
   it("traces the view, OPML, feed list and index routes", async () => {
     const fastify = build();
-    const cases: Array<[string, string, number]> = [
-      [`/view/${DAILY_ID}`, "GET-/view/_emailId", 200],
-      ["/rss/opml", "GET-/rss/opml", 200],
-      ["/rss/", "GET-/rss", 200],
-      ["/", "GET-/", 302],
+    const cases: Array<[string, string, number, string]> = [
+      [`/view/${DAILY_ID}`, "GET-/view/_emailId", 200, "/view/:emailId"],
+      ["/rss/opml", "GET-/rss/opml", 200, "/rss/opml"],
+      ["/rss/", "GET-/rss", 200, "/rss"],
+      ["/", "GET-/", 302, "/"],
+      ["/api/feeds", "GET-/api/feeds", 200, "/api/feeds"],
     ];
-    for (const [url, spanName, statusCode] of cases) {
+    for (const [url, spanName, statusCode, urlPath] of cases) {
       spans = [];
       startSpanMock.mockClear();
       const response = await fastify.inject({ method: "GET", url });
       expect(response.statusCode).toBe(statusCode);
       expect(spans.map((span) => span.name)).toEqual([spanName]);
       expect(spans[0].options).toEqual({ kind: SpanKind.SERVER });
+      expect(spans[0].attributes["url.path"]).toBe(urlPath);
       expect(spans[0].end).toHaveBeenCalledTimes(1);
     }
   });
@@ -143,5 +154,58 @@ describe("HTTP span tracing", () => {
     expect(spans.map((span) => span.name)).toEqual(["GET"]);
     expect(spans[0].parent).toBeUndefined();
     expect(spans[0].end).toHaveBeenCalledTimes(1);
+    expect(spans[0].attributes["url.path"]).toBe("/does-not-exist");
+  });
+});
+
+describe("span url.path redaction", () => {
+  const TOKEN = "0123456789abcdef01234567";
+
+  it("records the route template instead of a tokenized feed path", async () => {
+    const response = await build().inject({
+      method: "GET",
+      url: `/rss/thedaily.${TOKEN}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(spans[0].name).toBe("GET-/rss/_id");
+    expect(spans[0].attributes["url.path"]).toBe("/rss/:id");
+    expect(spans[0].attributes["http.route"]).toBe("/rss/:id");
+    expect(
+      attributeValues(spans[0]).some((value) => value.includes(TOKEN)),
+    ).toBe(false);
+  });
+
+  it("redacts a token-like segment on unmatched paths", async () => {
+    const response = await build().inject({
+      method: "GET",
+      url: `/rss/thedaily.${TOKEN}/extra`,
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(spans[0].name).toBe("GET");
+    expect(spans[0].attributes["url.path"]).toBe("/rss/:redacted/extra");
+    expect(
+      attributeValues(spans[0]).some((value) => value.includes(TOKEN)),
+    ).toBe(false);
+  });
+
+  it("redacts the token even when access control rejects the request", async () => {
+    const config = Object.assign(new Config(), {
+      PUBLIC_URL: "",
+      DATA_DIR: dataDir,
+      AUTH_PASSWORD: "s3cret",
+    });
+    app = buildApp(config);
+    const response = await app.inject({
+      method: "GET",
+      url: `/rss/thedaily.${TOKEN}`,
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(spans[0].attributes["url.path"]).toBe("/rss/:id");
+    expect(
+      attributeValues(spans[0]).some((value) => value.includes(TOKEN)),
+    ).toBe(false);
   });
 });

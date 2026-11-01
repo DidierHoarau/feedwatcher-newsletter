@@ -23,6 +23,20 @@ describe("Config", () => {
     expect(readme).toMatch(/`EMAIL_RETENTION_DAYS`[^\n]*\|\s*`3`\s*\|/);
   });
 
+  it("disables remote image blocking by default", () => {
+    expect(new Config().EMAIL_BLOCK_REMOTE_IMAGES).toBe(false);
+  });
+
+  it("documents the remote image blocking default in the README", () => {
+    const readme = fs.readFileSync(
+      path.resolve(__dirname, "../../README.md"),
+      "utf8",
+    );
+    expect(readme).toMatch(
+      /`EMAIL_BLOCK_REMOTE_IMAGES`[^\n]*\|\s*`false`\s*\|/,
+    );
+  });
+
   it("defaults the IMAP and fetch timeouts", () => {
     const config = new Config();
     expect(config.IMAP_SOCKET_TIMEOUT_MS).toBe(120000);
@@ -59,6 +73,7 @@ describe("Config.reloadAtomic", () => {
     "IMAP_HOST",
     "EMAIL_FETCH_IDLE",
     "EMAIL_RETENTION_DAYS",
+    "EMAIL_BLOCK_REMOTE_IMAGES",
     "FEED_OVERRIDES",
     "CORS_POLICY_ORIGIN",
   ];
@@ -148,6 +163,7 @@ describe("Config.reloadAtomic", () => {
       IMAP_HOST: "imap2.example.com",
       EMAIL_RETENTION_DAYS: 5,
       EMAIL_FETCH_IDLE: false,
+      EMAIL_BLOCK_REMOTE_IMAGES: true,
       FEED_OVERRIDES: { "news@example.com": { feedId: "daily" } },
     });
 
@@ -157,6 +173,7 @@ describe("Config.reloadAtomic", () => {
     expect(config.IMAP_HOST).toBe("imap2.example.com");
     expect(config.EMAIL_RETENTION_DAYS).toBe(5);
     expect(config.EMAIL_FETCH_IDLE).toBe(false);
+    expect(config.EMAIL_BLOCK_REMOTE_IMAGES).toBe(true);
     expect(config.FEED_OVERRIDES).toEqual({
       "news@example.com": { feedId: "daily" },
     });

@@ -82,6 +82,89 @@ describe("HtmlSanitizerSanitize", () => {
   });
 });
 
+describe("HtmlSanitizerSanitize remote image blocking", () => {
+  it("keeps remote image sources when blocking is disabled", () => {
+    const html = '<img src="https://cdn.example/hero.jpg" alt="Hero">';
+    expect(HtmlSanitizerSanitize(html)).toContain(
+      'src="https://cdn.example/hero.jpg"',
+    );
+    expect(HtmlSanitizerSanitize(html, true, false)).toContain(
+      'src="https://cdn.example/hero.jpg"',
+    );
+  });
+
+  it("removes remote sources and preserves alt, title and dimensions", () => {
+    const out = HtmlSanitizerSanitize(
+      '<img src="https://cdn.example/hero.jpg" alt="Hero" title="Hero title" width="600" height="400">',
+      true,
+      true,
+    );
+    expect(out).not.toContain("cdn.example");
+    expect(out).not.toContain("src=");
+    expect(out).toContain('alt="Hero"');
+    expect(out).toContain('title="Hero title"');
+    expect(out).toContain('width="600"');
+    expect(out).toContain('height="400"');
+  });
+
+  it("removes remote sources regardless of case or surrounding whitespace", () => {
+    for (const src of [
+      "HTTP://cdn.example/a.jpg",
+      "  https://cdn.example/b.jpg  ",
+      "//cdn.example/c.jpg",
+    ]) {
+      const out = HtmlSanitizerSanitize(
+        `<img src="${src}" alt="x">`,
+        true,
+        true,
+      );
+      expect(out).not.toContain("cdn.example");
+      expect(out).not.toContain("src=");
+      expect(out).toContain('alt="x"');
+    }
+  });
+
+  it("leaves relative sources untouched", () => {
+    for (const src of ["/img/local.png", "images/local.png"]) {
+      const out = HtmlSanitizerSanitize(
+        `<img src="${src}" alt="local">`,
+        true,
+        true,
+      );
+      expect(out).toContain(`src="${src}"`);
+    }
+  });
+
+  it("adds a placeholder alt only when the image has no alt text", () => {
+    const withoutAlt = HtmlSanitizerSanitize(
+      '<img src="https://cdn.example/a.jpg">',
+      true,
+      true,
+    );
+    expect(withoutAlt).toContain('alt="[remote image blocked]"');
+
+    const emptyAlt = HtmlSanitizerSanitize(
+      '<img src="https://cdn.example/b.jpg" alt="">',
+      true,
+      true,
+    );
+    expect(emptyAlt).toContain('alt="[remote image blocked]"');
+  });
+
+  it("keeps tracking-pixel stripping independent of remote blocking", () => {
+    const pixel = '<img src="https://tracker.example/p" width="1" height="1">';
+    // Block on + strip on: the pixel is removed entirely.
+    expect(HtmlSanitizerSanitize(pixel, true, true)).not.toContain("<img");
+    // Block on + strip off: the image stays without its source.
+    const kept = HtmlSanitizerSanitize(pixel, false, true);
+    expect(kept).toContain("<img");
+    expect(kept).not.toContain("src=");
+    expect(kept).not.toContain("tracker.example");
+    // Block off + strip on: the pixel is still removed.
+    expect(HtmlSanitizerSanitize(pixel, true, false)).not.toContain("<img");
+  });
+});
+
 describe("HtmlSanitizerGetTextSummary", () => {
   it("extracts plain text from HTML", () => {
     expect(HtmlSanitizerGetTextSummary("<p>Hello <b>world</b></p>")).toBe(

@@ -29,6 +29,7 @@ export class ViewRoutes {
           const sanitized = SanitizedBodyCacheGet(
             email,
             this.config.EMAIL_STRIP_TRACKING_PIXELS,
+            this.config.EMAIL_BLOCK_REMOTE_IMAGES,
           );
           return reply.send(renderViewPage(email, sanitized.html));
         }),
