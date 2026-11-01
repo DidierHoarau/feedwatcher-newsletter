@@ -52,6 +52,9 @@ let storeMutationAtMs = 0;
 // A feed that lost items on purge gets a fresh Last-Modified even when its
 // remaining content is older than the mutation.
 let feedMutationAtMs = new Map<string, number>();
+// Collision signatures already warned about: frequent index rebuilds must not
+// repeat the same warning.
+let loggedCollisions = new Set<string>();
 
 // One JSON record per line, appended on each save: writes cost O(new items),
 // never O(store). This keeps ingestion memory flat even when a whole mailbox
@@ -149,6 +152,7 @@ export function EmailsDataInit(
   feedIndex = undefined;
   storeMutationAtMs = 0;
   feedMutationAtMs = new Map();
+  loggedCollisions = new Set();
   SanitizedBodyCacheReset();
   let recordCount = 0;
   walkJournalLines((item) => {
@@ -217,17 +221,62 @@ function isUnknownSender(item: EmailItem): boolean {
   );
 }
 
-function itemTimestampMs(item: EmailItem): number {
-  const created = new Date(item.dateCreated).getTime();
+// Sender-controlled dates never move an item forward in time: the effective
+// received date is the earlier of the Date header and the local ingestion
+// time. Journals written before this clamp are handled here without a rewrite.
+function effectiveReceivedMs(item: EmailItem): number {
   const received = new Date(item.dateReceived).getTime();
-  return Math.max(
-    Number.isFinite(created) ? created : 0,
-    Number.isFinite(received) ? received : 0,
-  );
+  const created = new Date(item.dateCreated).getTime();
+  const validReceived = Number.isFinite(received) ? received : undefined;
+  const validCreated = Number.isFinite(created) ? created : undefined;
+  if (validReceived !== undefined && validCreated !== undefined) {
+    return Math.min(validReceived, validCreated);
+  }
+  return validReceived ?? validCreated ?? 0;
+}
+
+export function EmailItemGetEffectiveDateReceived(item: EmailItem): string {
+  return new Date(effectiveReceivedMs(item)).toISOString();
+}
+
+function itemTimestampMs(item: EmailItem): number {
+  return effectiveReceivedMs(item);
+}
+
+// Display label and grouping key of a sender identity. Distinct senders that
+// derive the same feed id are reported once per index content.
+function senderIdentity(item: EmailItem): string {
+  return `${(item.senderName || "").trim().toLowerCase()}\u0000${(
+    item.senderEmail || ""
+  )
+    .trim()
+    .toLowerCase()}`;
+}
+
+function senderLabel(item: EmailItem): string {
+  return `${item.senderName} <${item.senderEmail}>`;
+}
+
+function warnFeedIdCollisions(
+  sendersByFeedId: Map<string, Map<string, string>>,
+): void {
+  for (const [feedId, senders] of sendersByFeedId) {
+    if (senders.size < 2) continue;
+    const signature = `${feedId}\u0001${[...senders.keys()].sort().join("\u0001")}`;
+    if (loggedCollisions.has(signature)) continue;
+    loggedCollisions.add(signature);
+    const labels = [...senders.values()].sort();
+    logger.warn(
+      `Feed id "${feedId}" is shared by ${labels.length} distinct senders: ${labels.join(
+        ", ",
+      )}; if unintended, separate them with FEED_OVERRIDES`,
+    );
+  }
 }
 
 function buildFeedIndex(identityGeneration: number): FeedIndex {
   const itemsByFeedId = new Map<string, EmailItem[]>();
+  const sendersByFeedId = new Map<string, Map<string, string>>();
   const summaries: FeedSummary[] = [];
   const lastModifiedByFeed = new Map<string, number>();
   let lastModifiedMs = 0;
@@ -245,16 +294,23 @@ function buildFeedIndex(identityGeneration: number): FeedIndex {
     } else {
       itemsByFeedId.set(feedId, [item]);
     }
+    const senders = sendersByFeedId.get(feedId);
+    if (senders) {
+      senders.set(senderIdentity(item), senderLabel(item));
+    } else {
+      sendersByFeedId.set(
+        feedId,
+        new Map([[senderIdentity(item), senderLabel(item)]]),
+      );
+    }
     const previous = lastModifiedByFeed.get(feedId) || 0;
     if (timestamp > previous) {
       lastModifiedByFeed.set(feedId, timestamp);
     }
   }
+  warnFeedIdCollisions(sendersByFeedId);
   for (const [feedId, items] of itemsByFeedId) {
-    items.sort(
-      (a, b) =>
-        new Date(b.dateReceived).getTime() - new Date(a.dateReceived).getTime(),
-    );
+    items.sort((a, b) => effectiveReceivedMs(b) - effectiveReceivedMs(a));
     const latest = items[0];
     summaries.push({
       feedId,
@@ -262,7 +318,7 @@ function buildFeedIndex(identityGeneration: number): FeedIndex {
       senderName: latest.senderName,
       senderEmail: latest.senderEmail,
       itemCount: items.length,
-      latestDate: latest.dateReceived,
+      latestDate: EmailItemGetEffectiveDateReceived(latest),
     });
   }
   summaries.sort(
@@ -366,7 +422,12 @@ export function EmailsDataPurgeExpired(): void {
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
   const expired = new Set<string>();
   for (const [messageId, item] of recordsByMessageId) {
-    if (new Date(item.dateReceived).getTime() < cutoff) {
+    // Retention runs from local ingestion time: a sender-controlled Date
+    // header can neither purge an email early nor keep it forever. A record
+    // without a parsable ingestion time cannot be aged out safely, so it is
+    // treated as expired instead of being retained indefinitely.
+    const createdAt = new Date(item.dateCreated).getTime();
+    if (!Number.isFinite(createdAt) || createdAt < cutoff) {
       expired.add(messageId);
     }
   }

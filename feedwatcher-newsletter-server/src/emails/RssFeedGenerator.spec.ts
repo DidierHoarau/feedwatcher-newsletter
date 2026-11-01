@@ -171,3 +171,37 @@ describe("RssFeedGeneratorBuildFeedById", () => {
     }
   });
 });
+
+describe("RssFeedGeneratorBuildFeedById — sender dates", () => {
+  it("clamps a future item date in <pubDate>", () => {
+    const now = Date.now();
+    const future = new Date(now + 10 * 24 * 60 * 60 * 1000).toISOString();
+    const created = new Date(now - 60 * 60 * 1000).toISOString();
+    EmailItemsBatchSave([
+      makeItem({
+        id: "55555555-eeee-4eee-8eee-eeeeeeeeeeee",
+        messageId: "<future-pubdate@example.com>",
+        dateReceived: future,
+        dateCreated: created,
+      }),
+    ]);
+
+    const xml = RssFeedGeneratorBuildFeedById(
+      OTelTracer().startSpan("test"),
+      "thedaily",
+      "https://svc.example.com",
+    ) as string;
+
+    const expectedPubDate = new Date(created).toUTCString();
+    expect(xml).toContain(`<pubDate>${expectedPubDate}</pubDate>`);
+    const pubDates = [...xml.matchAll(/<pubDate>([^<]+)<\/pubDate>/g)].map(
+      (match) => Date.parse(match[1]),
+    );
+    expect(pubDates.length).toBeGreaterThan(0);
+    for (const publishedAt of pubDates) {
+      expect(publishedAt).toBeLessThanOrEqual(Date.now());
+    }
+    // Provenance keeps the sender's header value.
+    expect(xml).toContain(`<newsletter:dateReceived>${future}</newsletter:dateReceived>`);
+  });
+});

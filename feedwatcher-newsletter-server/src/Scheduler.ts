@@ -12,6 +12,7 @@ import {
   EmailFeedsListAll,
 } from "./emails/EmailsData";
 import {
+  FeedIdentityEnsureTokens,
   FeedIdentityInit,
   FeedIdentityPruneTokens,
 } from "./feeds/FeedIdentity";
@@ -44,6 +45,19 @@ function logAvailableFeeds(span: Span): void {
     // A journal read error after a successful fetch is not a fetch failure.
     logger.warn(
       `Unable to list available feeds: ${(err as Error).message}`,
+      span,
+    );
+  }
+}
+
+// Persist missing feed tokens in one batch after an index build, so listing
+// requests never write. Token persistence must never fail a fetch or a reload.
+function ensureFeedTokens(span?: Span): void {
+  try {
+    FeedIdentityEnsureTokens(EmailFeedsListAll().map((feed) => feed.feedId));
+  } catch (err) {
+    logger.warn(
+      `Unable to persist feed tokens: ${(err as Error).message}`,
       span,
     );
   }
@@ -161,6 +175,7 @@ export function SchedulerTriggerFetch(
   fetchInProgress = true;
   return fetchEmailsWithRetry(context, config)
     .then(() => {
+      ensureFeedTokens(context);
       ServerStatusRecordFetchSuccess();
     })
     .catch((err) => {
@@ -189,6 +204,9 @@ export async function SchedulerInit(context: Span, configIn: Config) {
       span,
     );
   }
+  // Startup index is built: create the tokens of every current feed in one
+  // atomic write, so listing requests never persist.
+  ensureFeedTokens(span);
 
   logger.info(
     `Scheduling email fetch with cron: ${config.EMAIL_FETCH_CRON}`,
@@ -244,6 +262,9 @@ export function SchedulerReload(configIn: Config): void {
   IdleWatcherStart(config, runIdleFetch);
 
   applyFeedIdentity();
+  // A new/changed override or private-URL mode changes the feed set without a
+  // fetch: persist the tokens of the current feeds in one batch.
+  ensureFeedTokens();
 
   const nextSnapshot = snapshotRestartOnly(config);
   const changedFields = RESTART_ONLY_FIELDS.filter(

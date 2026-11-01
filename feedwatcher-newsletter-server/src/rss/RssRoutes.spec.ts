@@ -3,9 +3,17 @@ import * as os from "os";
 import path from "path";
 import Fastify, { FastifyInstance } from "fastify";
 import { Config } from "../Config";
-import { EmailsDataInit, EmailItemsBatchSave } from "../emails/EmailsData";
+import {
+  EmailsDataInit,
+  EmailFeedsListAll,
+  EmailItemsBatchSave,
+} from "../emails/EmailsData";
 import { EmailItem } from "../emails/EmailFetcher";
-import { FeedIdentityGetFeedUrlId, FeedIdentityInit } from "../feeds/FeedIdentity";
+import {
+  FeedIdentityEnsureTokens,
+  FeedIdentityGetFeedUrlId,
+  FeedIdentityInit,
+} from "../feeds/FeedIdentity";
 import * as OTelContextMock from "../OTelContext";
 import { RssRoutes } from "./RssRoutes";
 
@@ -124,5 +132,57 @@ describe("feed token redaction in logs", () => {
     expect(response.statusCode).toBe(200);
     expect(response.headers["content-type"]).toContain("application/rss+xml");
     expect(loggedText()).not.toContain(token);
+  });
+});
+
+describe("feed ids without Latin characters", () => {
+  it("serves a tokenized feed for a non-Latin sender and 404s unknown fallback ids", async () => {
+    EmailItemsBatchSave([
+      makeItem({
+        id: "22222222-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        messageId: "<cn-news@example.com>",
+        senderName: "中文日报",
+        senderEmail: "cn@example.com",
+        subject: "今日要闻",
+      }),
+    ]);
+    const feed = EmailFeedsListAll().find(
+      (entry) => entry.senderName === "中文日报",
+    );
+    expect(feed?.feedId).toMatch(/^sender-[0-9a-f]{8}$/);
+    FeedIdentityEnsureTokens([feed!.feedId]);
+    const urlId = FeedIdentityGetFeedUrlId(feed!.feedId);
+    expect(urlId.startsWith(".")).toBe(false);
+
+    const response = await fastify.inject({
+      method: "GET",
+      url: `/rss/${urlId}`,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("application/rss+xml");
+
+    const unknown = await fastify.inject({
+      method: "GET",
+      url: "/rss/sender-deadbeef",
+    });
+    expect(unknown.statusCode).toBe(404);
+  });
+
+  it("does not write feed-tokens.json while serving listings", async () => {
+    FeedIdentityEnsureTokens(["thedaily"]);
+    const tokensPath = path.join(dataDir, "feed-tokens.json");
+    const before = fs.readFileSync(tokensPath, "utf8");
+    const mtime = fs.statSync(tokensPath).mtimeMs;
+
+    const listResponse = await fastify.inject({ method: "GET", url: "/rss/" });
+    const opmlResponse = await fastify.inject({
+      method: "GET",
+      url: "/rss/opml",
+    });
+    expect(listResponse.statusCode).toBe(200);
+    expect(opmlResponse.statusCode).toBe(200);
+
+    expect(fs.readFileSync(tokensPath, "utf8")).toBe(before);
+    expect(fs.statSync(tokensPath).mtimeMs).toBe(mtime);
   });
 });

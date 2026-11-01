@@ -2,7 +2,7 @@ import RSS from "rss";
 import { Span } from "@opentelemetry/api";
 import { OTelTracer } from "../OTelContext";
 import { FeedIdentityGetFeedUrlId, FeedIdentityGetTitle } from "../feeds/FeedIdentity";
-import { EmailItemsListById, EmailsDataGetFeedLastModified } from "./EmailsData";
+import { EmailItemsListById, EmailsDataGetFeedLastModified, EmailItemGetEffectiveDateReceived } from "./EmailsData";
 import { SanitizedBodyCacheGet } from "./SanitizedBodyCache";
 
 const FEED_TTL_MINUTES = 60;
@@ -45,7 +45,10 @@ export function RssFeedGeneratorBuildFeedById(
         description: sanitizedBody.summary,
         url: `${baseUrl}/view/${email.id}`,
         guid: email.id,
-        date: email.dateReceived,
+        // The item date uses the clamped effective date: a future Date header
+        // must not surface as a future <pubDate>. newsletter:dateReceived keeps
+        // the stored value for provenance.
+        date: EmailItemGetEffectiveDateReceived(email),
         custom_elements: [
           { "content:encoded": { _cdata: sanitizedBody.html } },
           { "newsletter:messageId": email.messageId },

@@ -400,6 +400,16 @@ async function parseAndSaveSlice(
         const body =
           parsed.html || HtmlSanitizerTextToHtml(parsed.text || "");
 
+        // One timestamp for the whole record, so dateReceived can never be
+        // later than the ingestion time. The Date header is sender-controlled:
+        // a future date is clamped to now, and an absent/invalid date falls
+        // back to now.
+        const now = new Date();
+        const headerDate = parsed.date ? parsed.date.getTime() : NaN;
+        const dateReceived = Number.isFinite(headerDate)
+          ? new Date(Math.min(headerDate, now.getTime()))
+          : now;
+
         const emailItem: EmailItem = {
           id: uuidv4(),
           messageId,
@@ -407,10 +417,8 @@ async function parseAndSaveSlice(
           senderEmail,
           subject: parsed.subject || "(no subject)",
           body,
-          dateReceived: parsed.date
-            ? parsed.date.toISOString()
-            : new Date().toISOString(),
-          dateCreated: new Date().toISOString(),
+          dateReceived: dateReceived.toISOString(),
+          dateCreated: now.toISOString(),
         };
 
         const senderId = FeedIdentityGetFeedId(senderName, senderEmail);

@@ -51,7 +51,7 @@ otherwise. `/api/status` stays unauthenticated for readiness probes.
 | `senderName`  | string | Sender display name of the feed's latest email. |
 | `senderEmail` | string | Sender address of the feed's latest email. |
 | `itemCount`   | number | Number of retained emails in the feed. |
-| `latestDate`  | string | `dateReceived` of the latest retained email, ISO‑8601. |
+| `latestDate`  | string | Effective received date of the latest retained email, ISO‑8601: the sender `Date` header clamped to the local ingestion time, so it is never in the future. |
 | `feedUrl`     | string | Currently advertised feed URL (`/rss/<feedId>` or `/rss/<feedId>.<token>`). |
 
 Ignored senders (`SENDER_IGNORE_LIST`) and emails without a usable sender are
@@ -97,7 +97,18 @@ gzip/brotli when the client advertises support and the body exceeds 1 KiB.
 
 - `FEED_OVERRIDES` maps a sender email or name to a stable `feedId` and/or
   `title`. Use it when a newsletter renames itself or when several senders
-  should merge into one feed.
+  should merge into one feed. A `feedId` must match
+  `^[a-z0-9][a-z0-9-]{0,63}$` (lowercase ASCII letters, digits and hyphens); an
+  invalid value (dot, slash, uppercase, empty, ...) is ignored with a warning
+  and the derived id is used.
+- Without an override, `feedId` is derived from the sender name by lowercasing
+  it and removing non-alphanumeric characters (`"The Daily Newsletter"` →
+  `thedailynewsletter`). A name with no ASCII alphanumeric character (Cyrillic,
+  CJK, Arabic, emoji-only, ...) falls back to `sender-<8 hex chars>` (the first
+  8 characters of the SHA-1 of the trimmed, lowercased name), so no sender gets
+  an empty id. Distinct names that normalize to the same id share one feed; use
+  `FEED_OVERRIDES` to separate them. Existing non-empty ids are never rewritten,
+  so subscriptions stay stable.
 - `FEED_PRIVATE_URLS` (default `true`) makes `feedUrl` a capability URL of the
   form `/rss/<feedId>.<token>`. Treat those URLs as secrets: anyone holding
   one can read the feed.
