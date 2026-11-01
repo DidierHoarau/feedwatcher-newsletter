@@ -6,9 +6,12 @@ import {
   EmailsDataInit,
   EmailDataGetUidState,
   EmailDataSetUidState,
+  EmailsDataGetFeedLastModified,
+  EmailsDataGetLastModified,
   EmailsDataGetRecordCount,
   EmailFeedsListAll,
   EmailItemGetById,
+  EmailItemGetEffectiveDateReceived,
   EmailItemsBatchSave,
   EmailItemsGetExistingIds,
   EmailItemsListById,
@@ -16,11 +19,30 @@ import {
   EmailsDataPurgeExpired,
 } from "./EmailsData";
 import { EmailItem } from "./EmailFetcher";
-import { FeedIdentityInit } from "../feeds/FeedIdentity";
+import {
+  FeedIdentityEnsureTokens,
+  FeedIdentityGetFeedUrlId,
+  FeedIdentityInit,
+  FeedIdentityResolveFeedUrlId,
+} from "../feeds/FeedIdentity";
 import {
   SanitizedBodyCacheGet,
   SanitizedBodyCacheStats,
 } from "./SanitizedBodyCache";
+
+jest.mock("../OTelContext", () => {
+  const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+  return {
+    OTelLogger: () => ({ createModuleLogger: () => logger }),
+    __mockLogger: logger,
+  };
+});
+
+const mockLogger = jest.requireMock("../OTelContext").__mockLogger as {
+  info: jest.Mock;
+  warn: jest.Mock;
+  error: jest.Mock;
+};
 
 // Partial mock: real fs-extra everywhere, but readSync becomes a controllable
 // jest.fn so a journal read error can be simulated.
@@ -55,6 +77,7 @@ let dataDir: string;
 let journalPath: string;
 
 beforeEach(() => {
+  jest.clearAllMocks();
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "emailsdata-"));
   journalPath = path.join(dataDir, "emails.jsonl");
   EmailsDataInit(7, dataDir);
@@ -383,7 +406,11 @@ describe("journal store", () => {
 
   it("purges expired items and compacts the journal to one line per message", () => {
     EmailItemsBatchSave([
-      makeItem({ messageId: "<old@example.com>", dateReceived: "2020-01-01T00:00:00.000Z" }),
+      makeItem({
+        messageId: "<old@example.com>",
+        dateReceived: "2020-01-01T00:00:00.000Z",
+        dateCreated: "2020-01-01T00:00:00.000Z",
+      }),
       makeItem({ messageId: "<new@example.com>" }),
     ]);
     EmailsDataPurgeExpired();
@@ -401,6 +428,7 @@ describe("journal store", () => {
       id: expiredId,
       messageId: "<expired-cache@example.com>",
       dateReceived: "2020-01-01T00:00:00.000Z",
+      dateCreated: "2020-01-01T00:00:00.000Z",
     });
     EmailItemsBatchSave([expired, makeItem({ messageId: "<new@example.com>" })]);
     SanitizedBodyCacheGet(expired);
@@ -428,6 +456,7 @@ describe("journal store", () => {
         id: "ffffffff-1111-4111-8111-111111111111",
         messageId: "<victim@example.com>",
         dateReceived: "2020-01-01T00:00:00.000Z",
+        dateCreated: "2020-01-01T00:00:00.000Z",
       }),
     ]);
     EmailsDataPurgeExpired();
@@ -476,6 +505,7 @@ function seedLargeJournal(): void {
     makeItem({
       messageId: "<expired@example.com>",
       dateReceived: "2020-01-01T00:00:00.000Z",
+      dateCreated: "2020-01-01T00:00:00.000Z",
     }),
   ];
   const filler = "x".repeat(500);
@@ -537,7 +567,11 @@ describe("EmailsDataGetRecordCount", () => {
 
   it("drops purged messages from the count", () => {
     EmailItemsBatchSave([
-      makeItem({ messageId: "<old@example.com>", dateReceived: "2020-01-01T00:00:00.000Z" }),
+      makeItem({
+        messageId: "<old@example.com>",
+        dateReceived: "2020-01-01T00:00:00.000Z",
+        dateCreated: "2020-01-01T00:00:00.000Z",
+      }),
       makeItem({
         id: "cccccccc-3333-4333-8333-333333333333",
         messageId: "<new@example.com>",
@@ -548,5 +582,190 @@ describe("EmailsDataGetRecordCount", () => {
     EmailsDataPurgeExpired();
 
     expect(EmailsDataGetRecordCount()).toBe(1);
+  });
+});
+
+describe("retention and sender-controlled dates", () => {
+  it("keeps an email with an old Date header for the full window from ingestion", () => {
+    EmailItemsBatchSave([
+      makeItem({
+        messageId: "<old-header@example.com>",
+        dateReceived: "2020-01-01T00:00:00.000Z",
+      }),
+    ]);
+
+    EmailsDataPurgeExpired();
+
+    expect(EmailItemsGetExistingIds()).toEqual(
+      new Set(["<old-header@example.com>"]),
+    );
+  });
+
+  it("keeps an email created exactly at the cutoff and purges one ms older", () => {
+    const fixedNow = Date.parse("2026-06-01T00:00:00.000Z");
+    const cutoff = fixedNow - 7 * 24 * 60 * 60 * 1000;
+    EmailItemsBatchSave([
+      makeItem({
+        messageId: "<boundary@example.com>",
+        dateCreated: new Date(cutoff).toISOString(),
+      }),
+      makeItem({
+        id: "bbbbbbbb-4444-4444-8444-444444444444",
+        messageId: "<older@example.com>",
+        dateCreated: new Date(cutoff - 1).toISOString(),
+      }),
+    ]);
+
+    const nowSpy = jest.spyOn(Date, "now").mockReturnValue(fixedNow);
+    try {
+      EmailsDataPurgeExpired();
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    expect(EmailItemsGetExistingIds()).toEqual(
+      new Set(["<boundary@example.com>"]),
+    );
+  });
+
+  it("treats a record without a parsable ingestion date as expired", () => {
+    EmailItemsBatchSave([
+      makeItem({ messageId: "<no-created@example.com>", dateCreated: "not-a-date" }),
+      makeItem({
+        id: "cccccccc-5555-4555-8555-555555555555",
+        messageId: "<live@example.com>",
+      }),
+    ]);
+
+    EmailsDataPurgeExpired();
+
+    expect(EmailItemsGetExistingIds()).toEqual(new Set(["<live@example.com>"]));
+  });
+
+  it("clamps a future Date header for ordering, latestDate and Last-Modified", () => {
+    const now = Date.now();
+    const future = new Date(now + 10 * 24 * 60 * 60 * 1000).toISOString();
+    const futureItem = makeItem({
+      id: "dddddddd-6666-4666-8666-666666666666",
+      messageId: "<future@example.com>",
+      dateReceived: future,
+      dateCreated: new Date(now - 60 * 60 * 1000).toISOString(),
+    });
+    const normalItem = makeItem({
+      id: "eeeeeeee-7777-4777-8777-777777777777",
+      messageId: "<normal@example.com>",
+      dateReceived: new Date(now - 30 * 60 * 1000).toISOString(),
+      dateCreated: new Date(now).toISOString(),
+    });
+    EmailItemsBatchSave([futureItem, normalItem]);
+
+    // The newer-ingested item sorts first even though the other claims a
+    // future date.
+    const items = EmailItemsListById("thedaily");
+    expect(items.map((item) => item.messageId)).toEqual([
+      "<normal@example.com>",
+      "<future@example.com>",
+    ]);
+
+    const feed = EmailFeedsListAll()[0];
+    expect(feed.latestDate).toBe(normalItem.dateReceived);
+    expect(Date.parse(feed.latestDate)).toBeLessThanOrEqual(Date.now());
+    expect(EmailsDataGetFeedLastModified("thedaily")).toBeLessThanOrEqual(
+      Date.now(),
+    );
+    expect(EmailsDataGetLastModified()).toBeLessThanOrEqual(Date.now());
+
+    // The effective date is the Date header clamped to the ingestion time;
+    // the stored journal value keeps the sender's header for provenance.
+    expect(EmailItemGetEffectiveDateReceived(futureItem)).toBe(
+      new Date(now - 60 * 60 * 1000).toISOString(),
+    );
+    expect(items[1].dateReceived).toBe(future);
+  });
+});
+
+describe("feed ids for real sender names", () => {
+  it("lists two non-Latin senders as two distinct reachable tokenized feeds", () => {
+    EmailItemsBatchSave([
+      makeItem({
+        id: "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        messageId: "<cn@example.com>",
+        senderName: "中文日报",
+        senderEmail: "cn@example.com",
+      }),
+      makeItem({
+        id: "22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        messageId: "<ru@example.com>",
+        senderName: "Новости",
+        senderEmail: "ru@example.com",
+      }),
+    ]);
+
+    const feeds = EmailFeedsListAll();
+    expect(feeds).toHaveLength(2);
+    for (const feed of feeds) {
+      expect(feed.feedId).toMatch(/^sender-[0-9a-f]{8}$/);
+      expect(feed.feedId).not.toBe("");
+    }
+    expect(new Set(feeds.map((feed) => feed.feedId)).size).toBe(2);
+
+    FeedIdentityInit({
+      ignoreList: "",
+      overrides: {},
+      privateUrls: true,
+      dataDir,
+    });
+    FeedIdentityEnsureTokens(feeds.map((feed) => feed.feedId));
+    for (const feed of feeds) {
+      const urlId = FeedIdentityGetFeedUrlId(feed.feedId);
+      expect(urlId.startsWith(".")).toBe(false);
+      expect(FeedIdentityResolveFeedUrlId(urlId)).toEqual({
+        feedId: feed.feedId,
+        valid: true,
+      });
+      expect(EmailItemsListById(feed.feedId)).toHaveLength(1);
+    }
+  });
+
+  it("warns once when distinct senders normalize to the same feed id", () => {
+    EmailItemsBatchSave([
+      makeItem({
+        id: "33333333-cccc-4ccc-8ccc-cccccccccccc",
+        messageId: "<slash@example.com>",
+        senderName: "A/B",
+        senderEmail: "a@example.com",
+      }),
+      makeItem({
+        id: "44444444-dddd-4ddd-8ddd-dddddddddddd",
+        messageId: "<ab@example.com>",
+        senderName: "AB",
+        senderEmail: "b@example.com",
+      }),
+    ]);
+
+    const feeds = EmailFeedsListAll();
+    expect(feeds).toHaveLength(1);
+    expect(feeds[0].feedId).toBe("ab");
+    expect(feeds[0].itemCount).toBe(2);
+
+    const collisionWarnings = () =>
+      mockLogger.warn.mock.calls.filter((call) =>
+        String(call[0]).includes("shared by"),
+      );
+    expect(collisionWarnings()).toHaveLength(1);
+    const message = String(collisionWarnings()[0][0]);
+    expect(message).toContain('"ab"');
+    expect(message).toContain("A/B <a@example.com>");
+    expect(message).toContain("AB <b@example.com>");
+
+    // An unchanged rebuild does not repeat the warning.
+    FeedIdentityInit({
+      ignoreList: "",
+      overrides: {},
+      privateUrls: false,
+      dataDir,
+    });
+    expect(EmailFeedsListAll()).toHaveLength(1);
+    expect(collisionWarnings()).toHaveLength(1);
   });
 });

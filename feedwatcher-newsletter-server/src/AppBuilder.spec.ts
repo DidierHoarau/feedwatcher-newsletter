@@ -15,7 +15,11 @@ import {
   EmailsDataPurgeExpired,
 } from "./emails/EmailsData";
 import { EmailItem } from "./emails/EmailFetcher";
-import { FeedIdentityGetFeedUrlId, FeedIdentityInit } from "./feeds/FeedIdentity";
+import {
+  FeedIdentityEnsureTokens,
+  FeedIdentityGetFeedUrlId,
+  FeedIdentityInit,
+} from "./feeds/FeedIdentity";
 
 const DAILY_ID = "11111111-1111-4111-8111-111111111111";
 const DAILY_2_ID = "22222222-2222-4222-8222-222222222222";
@@ -83,6 +87,7 @@ beforeAll(() => {
       subject: "Second daily issue",
       body: "<p>Second body</p>",
       dateReceived: "2026-10-16T08:00:00.000Z",
+      dateCreated: "2026-10-16T08:00:00.000Z",
     }),
     makeItem({
       id: BREW_ID,
@@ -107,6 +112,9 @@ beforeAll(() => {
       body: '<p>Pixel body</p><img src="https://tracker.example/pixel" width="1">',
     }),
   ]);
+  // Listing requests never persist tokens: seed the file the way the
+  // scheduler's ensure pass does.
+  FeedIdentityEnsureTokens(["thedaily", "morningbrew"]);
   OTelSetTracer(new StandardTracer(new Config()));
 });
 

@@ -204,7 +204,7 @@ The IMAP server certificate is verified against the system CA store by default (
 | `PUBLIC_URL`               | Public base URL of the service (used in feed URLs; empty = from the request)  | `` (empty)              |
 | `TRUST_PROXY`              | Trust `X-Forwarded-Proto`/`X-Forwarded-Host` from a reverse proxy (restart-only, see [Feed URLs and proxies](#feed-urls-and-proxies)) | `false` |
 | `EMAIL_FETCH_CRON`         | Cron expression for the email fetch schedule (fallback for IMAP IDLE)         | `0 * * * *` (hourly)    |
-| `EMAIL_RETENTION_DAYS`     | Number of days to retain emails before purging                                | `3`                     |
+| `EMAIL_RETENTION_DAYS`     | Number of days to retain emails after retrieval/ingestion before purging (see [Reliability](#reliability)) | `3`                     |
 | `DATA_DIR`                 | Directory for persisting email data                                           | `/data`                 |
 
 ## Fetching and freshness
@@ -226,7 +226,7 @@ The IMAP server certificate is verified against the system CA store by default (
 | `FEED_PRIVATE_URLS`           | Advertise tokenized feed URLs (`<feedId>.<token>`); bare feed ids keep working unless `FEED_PRIVATE_URLS_STRICT=true` | `true`  |
 | `FEED_PRIVATE_URLS_STRICT`    | With `FEED_PRIVATE_URLS=true`, reject bare feed ids with `404` (opt-in; bare-id subscriptions stop working) | `false` |
 | `SENDER_IGNORE_LIST`          | Comma-separated sender name/email fragments whose emails never become feeds        | `` (empty)              |
-| `FEED_OVERRIDES`              | JSON object mapping a sender email or name to a stable feed id and/or title        | `{}`    |
+| `FEED_OVERRIDES`              | JSON object mapping a sender email or name to a stable feed id (lowercase `[a-z0-9-]`, max 64 chars, no leading/trailing `-`) and/or title | `{}`    |
 
 ## Access control
 
@@ -247,6 +247,8 @@ When authentication is enabled (non-empty `AUTH_PASSWORD`), every endpoint excep
 }
 ```
 
+A `feedId` must match `^[a-z0-9][a-z0-9-]{0,63}$` (lowercase ASCII letters, digits and hyphens, starting with a letter or digit). An invalid value (a dot, a slash, uppercase, empty, ...) is ignored with a warning and the derived id is used; the override `title`, when present, is still applied. Dots are rejected because feed URLs use `<feedId>.<token>`, so a dotted id would make the feed unreachable.
+
 ## Reliability
 
 - **Durable ingestion.** Journal appends are fsync'd before they are considered successful. A failed journal write fails the fetch run and leaves the UID marker untouched, so the emails are fetched again on the next run instead of being lost.
@@ -254,6 +256,8 @@ When authentication is enabled (non-empty `AUTH_PASSWORD`), every endpoint excep
 - **Single-flight fetch.** Startup, cron and IMAP IDLE triggers share one guard: a trigger arriving while a fetch is in progress is skipped (and logged), so runs never overlap and cannot move the marker backwards.
 - **Timeouts.** Fetch connections use `IMAP_SOCKET_TIMEOUT_MS`, the IDLE connection uses `IMAP_IDLE_SOCKET_TIMEOUT_MS`, and every fetch run has an overall `EMAIL_FETCH_DEADLINE_MS` deadline. A connection that ends or closes mid-fetch settles the run instead of hanging it.
 - **Safe purge.** The hourly purge aborts without touching the journal when it cannot read it completely, and rewrites through an fsync'd temporary file followed by a rename, so the journal is never truncated.
+- **Retention runs from ingestion.** An email is kept for `EMAIL_RETENTION_DAYS` after this service retrieved and stored it (`dateCreated`), not after the sender's `Date` header. A first sync that imports old mail therefore keeps that mail for the full window from import, and a sender can neither purge emails early with an old date nor keep them forever with a future date. The sender `Date` header is clamped to the ingestion time for ordering, `latestDate`, RSS item dates and `Last-Modified`, so it can never move an item into the future; the journal keeps the original header value for provenance.
+- **Atomic feed tokens.** `feed-tokens.json` is replaced atomically (temporary file, fsync, rename) and only written by batch passes after a startup, fetch or configuration-reload index build — never on a listing request.
 
 ## Performance and HTTP caching
 
@@ -296,7 +300,7 @@ When authentication is enabled (`AUTH_PASSWORD` non-empty), every endpoint below
 | `GET`  | `/view/:emailId`  | Readable web view of one email (the feed items' permalink target); `404` for unknown or ignored emails |
 | `GET`  | `/api/status`     | Unauthenticated readiness and ingestion health snapshot (see below); excluded from tracing |
 
-The sender ID is derived from the sender name by lowercasing it and removing all non-alphanumeric characters (e.g., `"The Daily Newsletter"` → `thedailynewsletter`). It can be overridden per sender with `FEED_OVERRIDES`.
+The sender ID is derived from the sender name by lowercasing it and removing all non-alphanumeric characters (e.g., `"The Daily Newsletter"` → `thedailynewsletter`). It is always lowercase ASCII: when a name contains no ASCII alphanumeric character (`中文日报`, `Новости`, an emoji-only name, ...), the id falls back to `sender-<8 hex chars>` — the first 8 characters of the SHA-1 of the trimmed, lowercased name — so every sender gets a distinct, stable, reachable feed. Distinct names that normalize to the same id (for example `"A/B"` and `"AB"`) share one feed; a warning listing them is logged when the index is built, and `FEED_OVERRIDES` can separate them. Existing non-empty ids are never rewritten, so current feed ids and subscriptions stay stable. It can be overridden per sender with `FEED_OVERRIDES` (see [Content and feeds](#content-and-feeds)).
 
 The feed list, the catalogue, the OPML export and every feed answer conditional requests: they carry an `ETag` and `Last-Modified` and return `304 Not Modified` for `If-None-Match`/`If-Modified-Since`, so pollers do not re-download unchanged feeds. Feed payloads and the HTML pages are compressed with gzip/brotli when the client advertises support; `Accept-Encoding`-less requests get the identity body. See [Performance and HTTP caching](#performance-and-http-caching).
 
@@ -349,7 +353,7 @@ The HTML index also advertises one `<link rel="alternate" type="application/rss+
 | `title`       | Override-aware feed title, falling back to the sender name. |
 | `senderName` / `senderEmail` | Sender of the feed's latest retained email. |
 | `itemCount`   | Number of retained emails in the feed. |
-| `latestDate`  | `dateReceived` of the latest retained email, ISO-8601. |
+| `latestDate`  | Effective received date of the latest retained email, ISO-8601: the `Date` header clamped to the local ingestion time, so it is never in the future. |
 | `feedUrl`     | Currently advertised feed URL (`/rss/<feedId>` or `/rss/<feedId>.<token>`). |
 
 - **Ordering** is deterministic: `(title, feedId)`.

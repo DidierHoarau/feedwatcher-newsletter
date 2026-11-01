@@ -25,6 +25,7 @@ jest.mock("./emails/EmailsData", () => ({
   EmailFeedsListAll: jest.fn(),
 }));
 jest.mock("./feeds/FeedIdentity", () => ({
+  FeedIdentityEnsureTokens: jest.fn(),
   FeedIdentityInit: jest.fn(),
   FeedIdentityGetFeedUrlId: jest.fn(),
   FeedIdentityPruneTokens: jest.fn(),
@@ -55,6 +56,8 @@ const idleStartMock = IdleWatcherStart as unknown as jest.Mock;
 const scheduleJobMock = schedule.scheduleJob as unknown as jest.Mock;
 const feedsMock = EmailFeedsListAll as unknown as jest.Mock;
 const pruneTokensMock = FeedIdentityPruneTokens as unknown as jest.Mock;
+const ensureTokensMock = jest.requireMock("./feeds/FeedIdentity")
+  .FeedIdentityEnsureTokens as jest.Mock;
 const timeoutMock = TimeoutWait as unknown as jest.Mock;
 const mockLogger = jest.requireMock("./OTelContext").__mockLogger;
 const startSpanMock = jest.requireMock("./OTelContext").__startSpan as jest.Mock;
@@ -337,5 +340,57 @@ describe("startup fetch span and fetch health", () => {
     startupFetch.resolve();
     await flushAsync();
     expect(recordSuccessMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("feed token ensure passes", () => {
+  const feed = {
+    feedId: "daily",
+    title: "The Daily",
+    senderName: "The Daily",
+    senderEmail: "news@example.com",
+    itemCount: 1,
+    latestDate: "2026-10-15T08:00:00.000Z",
+  };
+
+  it("persists tokens for the startup index and after a successful fetch", async () => {
+    feedsMock.mockReturnValue([feed]);
+
+    await SchedulerInit(makeSpan(), makeConfig());
+    expect(ensureTokensMock).toHaveBeenCalledTimes(1);
+    expect(ensureTokensMock).toHaveBeenLastCalledWith(["daily"]);
+
+    await flushAsync();
+    expect(ensureTokensMock).toHaveBeenCalledTimes(2);
+    expect(ensureTokensMock).toHaveBeenLastCalledWith(["daily"]);
+  });
+
+  it("persists tokens again after a configuration reload", async () => {
+    feedsMock.mockReturnValue([feed]);
+    await SchedulerInit(makeSpan(), makeConfig());
+    await flushAsync();
+    ensureTokensMock.mockClear();
+
+    SchedulerReload(makeConfig({ FEED_PRIVATE_URLS: true }));
+
+    expect(ensureTokensMock).toHaveBeenCalledTimes(1);
+    expect(ensureTokensMock).toHaveBeenLastCalledWith(["daily"]);
+  });
+
+  it("logs a failed ensure pass without failing the fetch", async () => {
+    feedsMock.mockReturnValue([feed]);
+    ensureTokensMock.mockImplementation(() => {
+      throw new Error("disk full");
+    });
+
+    await SchedulerInit(makeSpan(), makeConfig());
+    await flushAsync();
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("Unable to persist feed tokens"),
+      expect.anything(),
+    );
+    expect(recordSuccessMock).toHaveBeenCalledTimes(1);
+    expect(recordErrorMock).not.toHaveBeenCalled();
   });
 });

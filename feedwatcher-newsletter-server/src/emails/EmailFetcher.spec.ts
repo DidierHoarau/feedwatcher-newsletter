@@ -165,13 +165,21 @@ function seedUidState(uid: number, uidvalidity: number): void {
   );
 }
 
-function rawEmail(uid: number, messageId?: string): string {
+// `dateHeader` defaults to a fixed past date; pass a value to control it and
+// `null` to omit the header entirely.
+function rawEmail(
+  uid: number,
+  messageId?: string,
+  dateHeader: string | null = "Wed, 22 Oct 2025 10:00:00 +0000",
+): string {
   const headers = [
     "From: The Daily <news@example.com>",
     `Subject: Issue ${uid}`,
-    "Date: Wed, 22 Oct 2025 10:00:00 +0000",
-    "Content-Type: text/plain; charset=utf-8",
   ];
+  if (dateHeader !== null) {
+    headers.push(`Date: ${dateHeader}`);
+  }
+  headers.push("Content-Type: text/plain; charset=utf-8");
   if (messageId !== undefined) {
     headers.push(`Message-ID: ${messageId}`);
   }
@@ -451,5 +459,66 @@ describe("EmailFetcherFetchEmails", () => {
     );
     expect(batchSaveMock).not.toHaveBeenCalled();
     expect(mockSpan.end).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("EmailFetcherFetchEmails — sender-controlled dates", () => {
+  it("clamps a future Date header to the ingestion time", async () => {
+    const future = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toUTCString();
+    FakeImapFlow.script = {
+      box: { uidValidity: 1 },
+      searchResults: [1],
+      messages: [rawEmail(1, "<m1@example.com>", future)],
+    };
+
+    await EmailFetcherFetchEmails(contextSpan, makeConfig());
+
+    const saved = batchSaveMock.mock.calls[0][0][0];
+    expect(saved.dateReceived).toBe(saved.dateCreated);
+    expect(new Date(saved.dateReceived).getTime()).toBeLessThanOrEqual(
+      new Date(saved.dateCreated).getTime(),
+    );
+  });
+
+  it("falls back to the ingestion time for an invalid Date header", async () => {
+    FakeImapFlow.script = {
+      box: { uidValidity: 1 },
+      searchResults: [1],
+      messages: [rawEmail(1, "<m1@example.com>", "not-a-date")],
+    };
+
+    await EmailFetcherFetchEmails(contextSpan, makeConfig());
+
+    const saved = batchSaveMock.mock.calls[0][0][0];
+    expect(saved.dateReceived).toBe(saved.dateCreated);
+  });
+
+  it("falls back to the ingestion time when the Date header is absent", async () => {
+    FakeImapFlow.script = {
+      box: { uidValidity: 1 },
+      searchResults: [1],
+      messages: [rawEmail(1, "<m1@example.com>", null)],
+    };
+
+    await EmailFetcherFetchEmails(contextSpan, makeConfig());
+
+    const saved = batchSaveMock.mock.calls[0][0][0];
+    expect(saved.dateReceived).toBe(saved.dateCreated);
+  });
+
+  it("keeps a past Date header and never stores a received date after ingestion", async () => {
+    FakeImapFlow.script = {
+      box: { uidValidity: 1 },
+      searchResults: [1],
+      messages: [rawEmail(1, "<m1@example.com>", "Wed, 22 Oct 2025 10:00:00 +0000")],
+    };
+
+    await EmailFetcherFetchEmails(contextSpan, makeConfig());
+
+    const saved = batchSaveMock.mock.calls[0][0][0];
+    expect(saved.dateReceived).toBe("2025-10-22T10:00:00.000Z");
+    expect(new Date(saved.dateReceived).getTime()).toBeLessThanOrEqual(
+      new Date(saved.dateCreated).getTime(),
+    );
   });
 });
