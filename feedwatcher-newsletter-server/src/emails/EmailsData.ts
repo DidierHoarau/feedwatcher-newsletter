@@ -63,11 +63,47 @@ let loggedCollisions = new Set<string>();
 // journal back to one record per message.
 const READ_CHUNK_BYTES = 1024 * 1024;
 
+type LineHandler = (item: EmailItem) => void;
+
+// Read one chunk and hand its complete lines to the handler. Returns the text
+// carried over to the next chunk, or undefined at end of file.
+function readJournalChunk(
+  fd: number,
+  chunk: Buffer,
+  decoder: StringDecoder,
+  carry: string,
+  handleLine: LineHandler,
+): string | undefined {
+  const bytesRead = fse.readSync(fd, chunk, 0, READ_CHUNK_BYTES, null);
+  if (bytesRead <= 0) {
+    return undefined;
+  }
+  const text = carry + decoder.write(chunk.subarray(0, bytesRead));
+  const lines = text.split("\n");
+  const remaining = lines.pop() || "";
+  for (const line of lines) {
+    processJournalLine(line, handleLine);
+  }
+  return remaining;
+}
+
+function processJournalLine(line: string, handleLine: LineHandler): void {
+  if (!line.trim()) return;
+  try {
+    const item = JSON.parse(line) as EmailItem;
+    if (item && item.messageId) {
+      handleLine(item);
+    }
+  } catch {
+    // Skip a malformed/partial line rather than losing the store.
+  }
+}
+
 // Walk the journal line by line without ever loading the file as one giant
 // string, invoking the handler for every valid record. Used at startup and by
 // the purge compaction; request paths never call it. I/O errors propagate: a
 // partially read journal must never be mistaken for the real store.
-function walkJournalLines(handleLine: (item: EmailItem) => void): void {
+function walkJournalLines(handleLine: LineHandler): void {
   if (!fse.existsSync(journalFilePath)) {
     return;
   }
@@ -76,28 +112,42 @@ function walkJournalLines(handleLine: (item: EmailItem) => void): void {
     const chunk = Buffer.alloc(READ_CHUNK_BYTES);
     const decoder = new StringDecoder("utf8");
     let carry = "";
-    let bytesRead = 0;
-    const processLine = (line: string): void => {
-      if (!line.trim()) return;
-      try {
-        const item = JSON.parse(line) as EmailItem;
-        if (item && item.messageId) {
-          handleLine(item);
-        }
-      } catch {
-        // Skip a malformed/partial line rather than losing the store.
-      }
-    };
-    while ((bytesRead = fse.readSync(fd, chunk, 0, READ_CHUNK_BYTES, null)) > 0) {
-      const text = carry + decoder.write(chunk.subarray(0, bytesRead));
-      const lines = text.split("\n");
-      carry = lines.pop() || "";
-      for (const line of lines) {
-        processLine(line);
-      }
+    let next: string | undefined;
+    while (
+      (next = readJournalChunk(fd, chunk, decoder, carry, handleLine)) !==
+      undefined
+    ) {
+      carry = next;
     }
     carry += decoder.end();
-    processLine(carry);
+    processJournalLine(carry, handleLine);
+  } finally {
+    fse.closeSync(fd);
+  }
+}
+
+// Same walk, but yields to the event loop between chunks: the purge can then
+// run without blocking request handling for the whole journal rewrite. Each
+// blocking slice is bounded by one READ_CHUNK_BYTES read instead of the file.
+async function walkJournalLinesAsync(handleLine: LineHandler): Promise<void> {
+  if (!fse.existsSync(journalFilePath)) {
+    return;
+  }
+  const fd = fse.openSync(journalFilePath, "r");
+  try {
+    const chunk = Buffer.alloc(READ_CHUNK_BYTES);
+    const decoder = new StringDecoder("utf8");
+    let carry = "";
+    let next: string | undefined;
+    while (
+      (next = readJournalChunk(fd, chunk, decoder, carry, handleLine)) !==
+      undefined
+    ) {
+      carry = next;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    carry += decoder.end();
+    processJournalLine(carry, handleLine);
   } finally {
     fse.closeSync(fd);
   }
@@ -373,21 +423,6 @@ export function EmailItemGetById(id: string): EmailItem | undefined {
   return item;
 }
 
-export function EmailSendersListAll(): {
-  senderName: string;
-  senderEmail: string;
-}[] {
-  const seen = new Map<string, string>();
-  for (const item of recordsByMessageId.values()) {
-    if (!seen.has(item.senderName)) {
-      seen.set(item.senderName, item.senderEmail);
-    }
-  }
-  return Array.from(seen.entries())
-    .map(([senderName, senderEmail]) => ({ senderName, senderEmail }))
-    .sort((a, b) => a.senderName.localeCompare(b.senderName));
-}
-
 function lastModifiedOf(contentTimestampMs: number, mutationAtMs: number): number {
   return Math.min(Date.now(), Math.max(contentTimestampMs, mutationAtMs));
 }
@@ -415,10 +450,12 @@ export function EmailsDataGetFeedLastModified(feedId: string): number {
 
 // Compaction: keep only the last record of each non-expired message, in one
 // streaming pass — expired message ids are computed from the in-memory index,
-// so the journal is read only to write the compacted copy. Any read or write
-// error aborts the purge without touching the journal: rewriting it from a
-// partial read would truncate data.
-export function EmailsDataPurgeExpired(): void {
+// so the journal is read only to write the compacted copy. The rewrite yields
+// to the event loop between 1 MiB chunks, so request handling is not stalled
+// for the whole journal. Any read or write error aborts the purge without
+// touching the journal: rewriting it from a partial read would truncate data.
+export async function EmailsDataPurgeExpired(): Promise<void> {
+  const startedAt = Date.now();
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
   const expired = new Set<string>();
   for (const [messageId, item] of recordsByMessageId) {
@@ -453,7 +490,7 @@ export function EmailsDataPurgeExpired(): void {
     const out = fse.openSync(tmpPath, "w");
     try {
       const seenOrdinals = new Map<string, number>();
-      walkJournalLines((item) => {
+      await walkJournalLinesAsync((item) => {
         const ordinal = (seenOrdinals.get(item.messageId) || 0) + 1;
         seenOrdinals.set(item.messageId, ordinal);
         const knownCount = recordCounts.get(item.messageId);
@@ -486,7 +523,7 @@ export function EmailsDataPurgeExpired(): void {
     feedIndex = undefined;
     SanitizedBodyCacheEvict(expiredItemIds);
     logger.info(
-      `Purged ${expired.size} expired email(s) older than ${retentionDays} day(s)`,
+      `Purged ${expired.size} expired email(s) older than ${retentionDays} day(s) in ${Date.now() - startedAt}ms`,
     );
   } catch (err) {
     if (tmpPath) {

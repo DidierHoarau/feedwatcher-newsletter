@@ -1,4 +1,5 @@
 import { StandardMeter, StandardTracer } from "@devopsplaybook.io/otel-utils";
+import { FastifyInstance } from "fastify";
 import * as fse from "fs-extra";
 import { buildApp } from "./AppBuilder";
 import { Config } from "./Config";
@@ -8,10 +9,69 @@ import {
   OTelSetTracer,
   OTelTracer,
 } from "./OTelContext";
-import { SchedulerInit, SchedulerReload } from "./Scheduler";
+import { SchedulerInit, SchedulerReload, SchedulerStop } from "./Scheduler";
+
+let fastifyInstance: FastifyInstance | undefined;
+let watchedConfigFile: string | undefined;
+let shutdownPromise: Promise<void> | undefined;
+let shutdownRequested = false;
+let shutdownHandlersRegistered = false;
+
+// Stop accepting work and drain: cancel the scheduler, stop IMAP IDLE, close
+// Fastify (no new requests, in-flight responses complete) and wait a bounded
+// time for the in-flight fetch/purge/token write. Never rejects; repeated
+// calls share one promise.
+export function Shutdown(): Promise<void> {
+  shutdownPromise ??= performShutdown();
+  return shutdownPromise;
+}
+
+async function performShutdown(): Promise<void> {
+  const logger = OTelLogger().createModuleLogger("app");
+  try {
+    logger.info("Shutdown requested: stopping the scheduler and draining the API");
+    const schedulerStopped = SchedulerStop();
+    if (watchedConfigFile) {
+      fse.unwatchFile(watchedConfigFile);
+    }
+    try {
+      await fastifyInstance?.close();
+    } catch (err) {
+      logger.error("Error closing the API", err as Error);
+    }
+    try {
+      await schedulerStopped;
+    } catch (err) {
+      logger.error("Error stopping the scheduler", err as Error);
+    }
+    logger.info("Shutdown complete");
+  } catch (err) {
+    logger.error("Error during shutdown", err as Error);
+  }
+}
+
+function registerShutdownHandlers(): void {
+  if (shutdownHandlersRegistered) return;
+  shutdownHandlersRegistered = true;
+  const logger = OTelLogger().createModuleLogger("app");
+  const onSignal = (signal: string): void => {
+    if (shutdownRequested) {
+      logger.warn(`${signal} received during shutdown: forcing exit`);
+      process.exit(1);
+      return;
+    }
+    shutdownRequested = true;
+    logger.info(`${signal} received: shutting down gracefully`);
+    void Shutdown().then(() => process.exit(0));
+  };
+  process.on("SIGTERM", () => onSignal("SIGTERM"));
+  process.on("SIGINT", () => onSignal("SIGINT"));
+}
 
 export async function startServer(): Promise<void> {
   const logger = OTelLogger().createModuleLogger("app");
+  shutdownPromise = undefined;
+  shutdownRequested = false;
 
   logger.info("====== Starting FeedWatcher Newsletter Server ======");
   logger.info(
@@ -41,6 +101,7 @@ export async function startServer(): Promise<void> {
   // watcher must never reject. Registered after SchedulerInit so the
   // scheduler state exists; re-entrancy guard against poll overlaps.
   let reloading = false;
+  watchedConfigFile = config.CONFIG_FILE;
   fse.watchFile(config.CONFIG_FILE, async () => {
     if (reloading) return;
     reloading = true;
@@ -77,6 +138,7 @@ export async function startServer(): Promise<void> {
   // API
 
   const fastify = buildApp(config);
+  fastifyInstance = fastify;
 
   fastify.listen({ port: config.API_PORT, host: "0.0.0.0" }, (err) => {
     if (err) {
@@ -85,6 +147,7 @@ export async function startServer(): Promise<void> {
       return;
     }
     logger.info(`API Listening on port ${config.API_PORT}`);
+    registerShutdownHandlers();
   });
 }
 

@@ -3,7 +3,7 @@ import * as schedule from "node-schedule";
 import { Config } from "./Config";
 import { OTelLogger, OTelTracer } from "./OTelContext";
 import { EmailFetcherFetchEmails } from "./emails/EmailFetcher";
-import { IdleWatcherStart } from "./emails/IdleWatcher";
+import { IdleWatcherStart, IdleWatcherStop } from "./emails/IdleWatcher";
 import { TimeoutWait } from "./utils-std-ts/Timeout";
 import {
   EmailsDataInit,
@@ -24,19 +24,23 @@ import {
 const logger = OTelLogger().createModuleLogger("Scheduler");
 
 // Fields that cannot be applied to a running process; a config change to one
-// of them is reported and only takes effect after a restart.
+// of them is reported and only takes effect after a restart. IMAP settings are
+// deliberately absent: the fetcher re-reads the shared mutable Config on every
+// fetch, and the IDLE connection applies them on its next reconnect.
 const RESTART_ONLY_FIELDS = [
-  "IMAP_HOST",
-  "IMAP_PORT",
-  "IMAP_TLS",
-  "IMAP_USER",
-  "IMAP_MAILBOX",
-  "IMAP_TLS_INSECURE",
-  "IMAP_TLS_CA_FILE",
   "DATA_DIR",
   "API_PORT",
   "TRUST_PROXY",
+  "OPENTELEMETRY_COLLECTOR_HTTP_TRACES",
+  "OPENTELEMETRY_COLLECTOR_HTTP_METRICS",
+  "OPENTELEMETRY_COLLECTOR_HTTP_LOGS",
+  "OPENTELEMETRY_COLLECTOR_AWS",
+  "OPENTELEMETRY_COLLECTOR_EXPORT_LOGS_INTERVAL_SECONDS",
+  "OPENTELEMETRY_COLLECTOR_EXPORT_METRICS_INTERVAL_SECONDS",
+  "OPENTELEMETRY_COLLECT_AUTHORIZATION_HEADER",
 ] as const;
+
+const SHUTDOWN_WAIT_TIMEOUT_MS = 10000;
 
 function logAvailableFeeds(span: Span): void {
   try {
@@ -98,6 +102,9 @@ let fetchInProgress = false;
 let fetchJob: schedule.Job | undefined;
 let appliedCron = "";
 let restartOnlySnapshot: Record<string, string> = {};
+let stopping = false;
+let stopPromise: Promise<void> | undefined;
+let currentFetch: Promise<void> | undefined;
 
 function snapshotRestartOnly(configIn: Config): Record<string, string> {
   const snapshot: Record<string, string> = {};
@@ -141,18 +148,54 @@ function runStartupFetch(): void {
     });
 }
 
+// One fetch cycle: retries, refreshes the feed tokens and records the health
+// of the run. Callers own the single-flight bookkeeping.
+async function executeFetch(context: Span): Promise<void> {
+  try {
+    await fetchEmailsWithRetry(context, config);
+    ensureFeedTokens(context);
+    ServerStatusRecordFetchSuccess();
+  } catch (err) {
+    ServerStatusRecordFetchError(err);
+    throw err;
+  }
+}
+
 function runCronFetch(): void {
+  if (stopping) {
+    return;
+  }
+  if (fetchInProgress) {
+    logger.warn("Skipping cron email fetch: a fetch is already in progress");
+    return;
+  }
+  fetchInProgress = true;
   const jobSpan = OTelTracer().startSpan("ScheduledEmailFetch");
-  EmailsDataPurgeExpired();
-  SchedulerTriggerFetch("cron", jobSpan)
-    .then(() => {
-      logAvailableFeeds(jobSpan);
-      jobSpan.end();
-    })
+  // Purge and fetch form one single-flight unit: the fetch never starts while
+  // the compaction is running, and the async purge cannot become an unhandled
+  // rejection because the whole chain has a catch.
+  const run = (async () => {
+    try {
+      await EmailsDataPurgeExpired();
+    } catch (err) {
+      // A failed purge must never block ingestion; it is logged and the
+      // journal is left untouched by the purge itself.
+      logger.error("Error purging expired emails", err, jobSpan);
+    }
+    await executeFetch(jobSpan);
+    logAvailableFeeds(jobSpan);
+  })()
     .catch((err) => {
       logger.error(`Error fetching emails on schedule`, err, jobSpan);
+    })
+    .finally(() => {
+      fetchInProgress = false;
+      if (currentFetch === run) {
+        currentFetch = undefined;
+      }
       jobSpan.end();
     });
+  currentFetch = run;
 }
 
 // Single-flight guard: startup, cron and IDLE triggers can fire concurrently,
@@ -165,6 +208,9 @@ export function SchedulerTriggerFetch(
   trigger: "startup" | "cron" | "idle",
   context: Span,
 ): Promise<void> {
+  if (stopping) {
+    return Promise.resolve();
+  }
   if (fetchInProgress) {
     logger.warn(
       `Skipping ${trigger} email fetch: a fetch is already in progress`,
@@ -173,24 +219,59 @@ export function SchedulerTriggerFetch(
     return Promise.resolve();
   }
   fetchInProgress = true;
-  return fetchEmailsWithRetry(context, config)
-    .then(() => {
-      ensureFeedTokens(context);
-      ServerStatusRecordFetchSuccess();
-    })
-    .catch((err) => {
-      ServerStatusRecordFetchError(err);
-      throw err;
-    })
-    .finally(() => {
-      fetchInProgress = false;
-    });
+  const run = executeFetch(context).finally(() => {
+    fetchInProgress = false;
+    if (currentFetch === run) {
+      currentFetch = undefined;
+    }
+  });
+  currentFetch = run;
+  return run;
+}
+
+// Stop the scheduler: no new cron or startup/IDLE work is started, the IDLE
+// connection is closed, and the in-flight fetch (or cron purge/fetch) is
+// awaited up to timeoutMs so a shutdown can drain journal writes. Idempotent:
+// repeated calls share one shutdown promise.
+export function SchedulerStop(
+  timeoutMs = SHUTDOWN_WAIT_TIMEOUT_MS,
+): Promise<void> {
+  stopPromise ??= performStop(timeoutMs);
+  return stopPromise;
+}
+
+async function performStop(timeoutMs: number): Promise<void> {
+  stopping = true;
+  fetchJob?.cancel();
+  fetchJob = undefined;
+  IdleWatcherStop();
+  const pending = currentFetch;
+  if (!pending) {
+    return;
+  }
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      pending.catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 export async function SchedulerInit(context: Span, configIn: Config) {
   const span = OTelTracer().startSpan("SchedulerInit", context);
   config = configIn;
   restartOnlySnapshot = snapshotRestartOnly(config);
+  stopping = false;
+  stopPromise = undefined;
+  currentFetch = undefined;
+  fetchInProgress = false;
 
   EmailsDataInit(Number(config.EMAIL_RETENTION_DAYS), config.DATA_DIR);
   applyFeedIdentity();

@@ -1,4 +1,4 @@
-import { startServer } from "./App";
+import { Shutdown, startServer } from "./App";
 
 jest.mock("@devopsplaybook.io/otel-utils", () => ({
   StandardTracer: jest.fn(),
@@ -35,11 +35,17 @@ jest.mock("./Config", () => {
 jest.mock("./Scheduler", () => ({
   SchedulerInit: jest.fn().mockResolvedValue(undefined),
   SchedulerReload: jest.fn(),
+  SchedulerStop: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock("./AppBuilder", () => {
   const listen = jest.fn();
-  return { buildApp: jest.fn(() => ({ listen })), __listen: listen };
+  const close = jest.fn();
+  return {
+    buildApp: jest.fn(() => ({ listen, close })),
+    __listen: listen,
+    __close: close,
+  };
 });
 
 jest.mock("fs-extra", () => {
@@ -48,6 +54,7 @@ jest.mock("fs-extra", () => {
     watchFile: jest.fn((_file: string, callback: () => Promise<void>) => {
       state.watchCallback = callback;
     }),
+    unwatchFile: jest.fn(),
     readJson: jest.fn(),
     __state: state,
   };
@@ -60,7 +67,23 @@ const appBuilderMock = jest.requireMock("./AppBuilder");
 const fseMock = jest.requireMock("fs-extra");
 const fseState = fseMock.__state;
 
+// Capture the signal handlers instead of registering real process listeners,
+// so a test that fires SIGTERM cannot leak into other suites.
+const processHandlers: Record<string, () => void> = {};
+const processOnMock = jest
+  .spyOn(process, "on")
+  .mockImplementation(((event: string, handler: () => void) => {
+    processHandlers[event] = handler;
+    return process;
+  }) as never);
+
 let exitMock: jest.SpyInstance;
+
+async function flushAsync(): Promise<void> {
+  for (let i = 0; i < 10; i++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -74,6 +97,10 @@ beforeEach(() => {
 
 afterEach(() => {
   exitMock.mockRestore();
+});
+
+afterAll(() => {
+  processOnMock.mockRestore();
 });
 
 describe("startServer", () => {
@@ -240,5 +267,52 @@ describe("startServer", () => {
 
     expect(configMock.reloadAtomic).toHaveBeenCalledTimes(2);
     expect(schedulerMock.SchedulerReload).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Shutdown", () => {
+  it("stops the scheduler, unwatches the config and closes the API once", async () => {
+    await startServer();
+
+    await Shutdown();
+
+    expect(schedulerMock.SchedulerStop).toHaveBeenCalledTimes(1);
+    expect(fseMock.unwatchFile).toHaveBeenCalledWith("config.json");
+    expect(appBuilderMock.__close).toHaveBeenCalledTimes(1);
+
+    await Shutdown();
+
+    expect(schedulerMock.SchedulerStop).toHaveBeenCalledTimes(1);
+    expect(appBuilderMock.__close).toHaveBeenCalledTimes(1);
+  });
+
+  it("swallows an API close failure", async () => {
+    await startServer();
+    appBuilderMock.__close.mockRejectedValueOnce(new Error("close failed"));
+
+    await expect(Shutdown()).resolves.toBeUndefined();
+
+    expect(otelMock.__logger.error).toHaveBeenCalledWith(
+      "Error closing the API",
+      expect.objectContaining({ message: "close failed" }),
+    );
+  });
+});
+
+describe("signal handlers", () => {
+  it("shuts down gracefully and exits 0, then forces exit 1 on a second signal", async () => {
+    await startServer();
+
+    const sigterm = processHandlers.SIGTERM;
+    expect(sigterm).toBeDefined();
+
+    sigterm();
+    await flushAsync();
+
+    expect(schedulerMock.SchedulerStop).toHaveBeenCalledTimes(1);
+    expect(exitMock).toHaveBeenCalledWith(0);
+
+    expect(() => sigterm()).not.toThrow();
+    expect(exitMock).toHaveBeenCalledWith(1);
   });
 });

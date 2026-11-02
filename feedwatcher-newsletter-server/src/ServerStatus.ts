@@ -1,5 +1,6 @@
 import { EmailDataGetUidState, EmailsDataGetRecordCount } from "./emails/EmailsData";
 import { IdleWatcherGetState } from "./emails/IdleWatcher";
+import { SanitizedBodyCacheStats } from "./emails/SanitizedBodyCache";
 
 export interface ServerStatus {
   started: boolean;
@@ -8,6 +9,7 @@ export interface ServerStatus {
   uidvalidity: number;
   recordCount: number;
   idle: { enabled: boolean; connected: boolean };
+  sanitizedBodyCache: { entries: number; bytes: number };
   lastError: string | null;
 }
 
@@ -36,6 +38,7 @@ export function ServerStatusGet(): ServerStatus {
     uidvalidity,
     recordCount: EmailsDataGetRecordCount(),
     idle: IdleWatcherGetState(),
+    sanitizedBodyCache: SanitizedBodyCacheStats(),
     lastError,
   };
 }

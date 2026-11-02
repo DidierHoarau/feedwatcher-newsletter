@@ -89,6 +89,9 @@ spec:
       labels:
         app: feedwatcher-newsletter
     spec:
+      # The service drains for up to 10 s on SIGTERM; keep the grace period
+      # comfortably above that so Kubernetes does not SIGKILL the process.
+      terminationGracePeriodSeconds: 30
       # The image runs as the unprivileged node user (uid/gid 1000). The mount
       # hides the image's own /data, so fsGroup makes the volume writable.
       securityContext:
@@ -152,7 +155,7 @@ spec:
     app: feedwatcher-newsletter
 ```
 
-The 1Gi memory limit reflects the in-memory index: a ~96 MB journal indexes to roughly 340 MB RSS with a ~540 MB peak, so the previous 256Mi limit was below steady state; the 256Mi request is the steady-state baseline. Keep `replicas: 1`: the claim is ReadWriteOnce and the journal has a single writer, so multiple replicas would either fail to mount or duplicate ingestion.
+The 1Gi memory limit reflects the in-memory index: a ~96 MB journal indexes to roughly 340 MB RSS with a ~540 MB peak, so the previous 256Mi limit was below steady state; the 256Mi request is the steady-state baseline. Keep `replicas: 1`: the claim is ReadWriteOnce and the journal has a single writer, so multiple replicas would either fail to mount or duplicate ingestion. On termination the service stops the scheduler and IDLE connection, drains the API and waits up to 10 s for in-flight journal work; `terminationGracePeriodSeconds: 30` gives it room to finish before Kubernetes escalates to `SIGKILL`.
 
 # Security and privacy
 
@@ -192,8 +195,8 @@ Configuration values can be set via environment variables or through the `config
 | `IMAP_USER`     | IMAP account username              |         |
 | `IMAP_PASSWORD` | IMAP account password              |         |
 | `IMAP_MAILBOX`  | Mailbox folder to read emails from | `INBOX` |
-| `IMAP_TLS_INSECURE` | **Unsafe.** Disable TLS certificate verification for the IMAP server (the server identity is then not authenticated). Restart-only. | `false` |
-| `IMAP_TLS_CA_FILE` | Path to an extra PEM CA bundle trusted in addition to the system/public roots, e.g. for a self-hosted server with a private CA. Restart-only. | `` (empty) |
+| `IMAP_TLS_INSECURE` | **Unsafe.** Disable TLS certificate verification for the IMAP server (the server identity is then not authenticated). Applied on the next fetch (and on the next IDLE reconnect). | `false` |
+| `IMAP_TLS_CA_FILE` | Path to an extra PEM CA bundle trusted in addition to the system/public roots, e.g. for a self-hosted server with a private CA. Applied on the next fetch (and on the next IDLE reconnect). | `` (empty) |
 | `IMAP_SOCKET_TIMEOUT_MS` | Socket inactivity timeout for fetch connections in milliseconds (`0` disables) | `120000` |
 | `IMAP_IDLE_SOCKET_TIMEOUT_MS` | Socket inactivity timeout for the IDLE connection in milliseconds; must exceed the 300 s IDLE keepalive (`0` disables) | `600000` |
 
@@ -258,7 +261,8 @@ A `feedId` must match `^[a-z0-9][a-z0-9-]{0,63}$` (lowercase ASCII letters, digi
 - **Resume marker and UIDVALIDITY.** The resume state lives in `DATA_DIR/last-uid.json` as `{ "uid": ..., "uidvalidity": ... }`. The mailbox UIDVALIDITY is compared on every connection: when it changes (mailbox recreated or migrated), the marker is reset with a warning and the mailbox is re-scanned from UID 1. Existing journal items are kept; message-id deduplication prevents duplicates and retention applies to old items. A legacy `last-uid.txt` marker is imported once (with an unknown UIDVALIDITY that is adopted from the server without resetting the UID) and left in place.
 - **Single-flight fetch.** Startup, cron and IMAP IDLE triggers share one guard: a trigger arriving while a fetch is in progress is skipped (and logged), so runs never overlap and cannot move the marker backwards.
 - **Timeouts.** Fetch connections use `IMAP_SOCKET_TIMEOUT_MS`, the IDLE connection uses `IMAP_IDLE_SOCKET_TIMEOUT_MS`, and every fetch run has an overall `EMAIL_FETCH_DEADLINE_MS` deadline. A connection that ends or closes mid-fetch settles the run instead of hanging it.
-- **Safe purge.** The hourly purge aborts without touching the journal when it cannot read it completely, and rewrites through an fsync'd temporary file followed by a rename, so the journal is never truncated.
+- **Safe purge.** The hourly purge aborts without touching the journal when it cannot read it completely, and rewrites through an fsync'd temporary file followed by a rename, so the journal is never truncated. Compaction streams the journal in 1 MiB chunks and yields to the event loop between chunks, so a large journal rewrite no longer stalls request handling, and the purge logs how long it took.
+- **Graceful shutdown.** On `SIGTERM`/`SIGINT` the process stops the fetch scheduler and the IMAP IDLE connection, stops accepting new requests and drains the Fastify server, then waits up to 10 s for an in-flight fetch, compaction or token write before exiting `0`. A second signal forces an immediate exit (`1`). Keep the pod's `terminationGracePeriodSeconds` above that 10 s wait so Kubernetes does not send `SIGKILL` first.
 - **Retention runs from ingestion.** An email is kept for `EMAIL_RETENTION_DAYS` after this service retrieved and stored it (`dateCreated`), not after the sender's `Date` header. A first sync that imports old mail therefore keeps that mail for the full window from import, and a sender can neither purge emails early with an old date nor keep them forever with a future date. The sender `Date` header is clamped to the ingestion time for ordering, `latestDate`, RSS item dates and `Last-Modified`, so it can never move an item into the future; the journal keeps the original header value for provenance.
 - **Atomic feed tokens.** `feed-tokens.json` is replaced atomically (temporary file, fsync, rename) and only written by batch passes after a startup, fetch or configuration-reload index build — never on a listing request.
 
@@ -272,7 +276,7 @@ A `feedId` must match `^[a-z0-9][a-z0-9-]{0,63}$` (lowercase ASCII letters, digi
 
 ## Configuration reload
 
-`config.json` is watched and reloaded without a restart. These values are applied immediately: `EMAIL_FETCH_CRON` (the job is rescheduled), `EMAIL_RETENTION_DAYS`, `EMAIL_FETCH_IDLE` (the IDLE connection is started or stopped), `SENDER_IGNORE_LIST`, `FEED_OVERRIDES`, `FEED_PRIVATE_URLS`, `FEED_PRIVATE_URLS_STRICT`, `AUTH_USERNAME`, `AUTH_PASSWORD`, `PUBLIC_URL`, `EMAIL_STRIP_TRACKING_PIXELS`, `EMAIL_BLOCK_REMOTE_IMAGES` and the `EMAIL_FETCH_*` knobs. These are **restart-only** (a warning is logged when they change): `IMAP_HOST`, `IMAP_PORT`, `IMAP_TLS`, `IMAP_USER`, `IMAP_PASSWORD`, `IMAP_MAILBOX`, `IMAP_TLS_INSECURE`, `IMAP_TLS_CA_FILE`, `DATA_DIR`, `API_PORT`, `TRUST_PROXY` and the OpenTelemetry exporter settings. An unreadable or unparsable `config.json` is ignored and the last valid configuration stays active. A semantically invalid value (for example a non-numeric `EMAIL_RETENTION_DAYS`, a non-boolean `EMAIL_FETCH_IDLE` or a malformed `FEED_OVERRIDES`) rejects the whole reload: no value from that file is applied, the previous configuration stays active, the error is logged with the failing field, and the server keeps running. Retention, cron, IDLE and feed identity are updated only after a fully successful reload.
+`config.json` is watched and reloaded without a restart. These values are applied immediately: `EMAIL_FETCH_CRON` (the job is rescheduled), `EMAIL_RETENTION_DAYS`, `EMAIL_FETCH_IDLE` (the IDLE connection is started or stopped), `SENDER_IGNORE_LIST`, `FEED_OVERRIDES`, `FEED_PRIVATE_URLS`, `FEED_PRIVATE_URLS_STRICT`, `AUTH_USERNAME`, `AUTH_PASSWORD`, `PUBLIC_URL`, `EMAIL_STRIP_TRACKING_PIXELS`, `EMAIL_BLOCK_REMOTE_IMAGES` and the `EMAIL_FETCH_*` knobs. The IMAP settings (`IMAP_HOST`, `IMAP_PORT`, `IMAP_TLS`, `IMAP_USER`, `IMAP_PASSWORD`, `IMAP_MAILBOX`, `IMAP_TLS_INSECURE`, `IMAP_TLS_CA_FILE`) are re-read on every fetch and apply on the next fetch; the long-lived IDLE connection applies them on its next reconnect (`IMAP_IDLE_SOCKET_TIMEOUT_MS` likewise). These are **restart-only** (a warning is logged when they change): `DATA_DIR`, `API_PORT`, `TRUST_PROXY` and the OpenTelemetry exporter settings (`OPENTELEMETRY_COLLECTOR_HTTP_TRACES`, `OPENTELEMETRY_COLLECTOR_HTTP_METRICS`, `OPENTELEMETRY_COLLECTOR_HTTP_LOGS`, `OPENTELEMETRY_COLLECTOR_AWS`, `OPENTELEMETRY_COLLECTOR_EXPORT_LOGS_INTERVAL_SECONDS`, `OPENTELEMETRY_COLLECTOR_EXPORT_METRICS_INTERVAL_SECONDS`, `OPENTELEMETRY_COLLECT_AUTHORIZATION_HEADER`). An unreadable or unparsable `config.json` is ignored and the last valid configuration stays active. A semantically invalid value (for example a non-numeric `EMAIL_RETENTION_DAYS`, a non-boolean `EMAIL_FETCH_IDLE` or a malformed `FEED_OVERRIDES`) rejects the whole reload: no value from that file is applied, the previous configuration stays active, the error is logged with the failing field, and the server keeps running. Retention, cron, IDLE and feed identity are updated only after a fully successful reload.
 
 ## OpenTelemetry
 
@@ -378,6 +382,7 @@ The full contract (fields, versioning rule, overrides, private-URL modes) is doc
   "uidvalidity": 7,
   "recordCount": 42,
   "idle": { "enabled": true, "connected": true },
+  "sanitizedBodyCache": { "entries": 3, "bytes": 20480 },
   "lastError": null
 }
 ```
@@ -386,5 +391,6 @@ The full contract (fields, versioning rule, overrides, private-URL modes) is doc
 - `lastUid`/`uidvalidity` mirror the durable resume marker `DATA_DIR/last-uid.json`.
 - `recordCount` is the number of indexed emails (one per unique message id).
 - `idle.enabled` stays `true` while IMAP IDLE is running; `idle.connected` turns `false` while it is waiting to reconnect — a stall detector can compare both.
+- `sanitizedBodyCache` reports the number of entries and the accounted size (UTF-16 code units) of the bounded 32 MiB sanitized-body LRU, so its memory use is observable.
 
 `/api/status` only becomes reachable after `DATA_DIR` has been read and indexed, because the server loads the journal before it starts listening, so a successful probe never observes a half-built index. `lastSuccessfulFetchAt` stays `null` until the first fetch completes, which distinguishes "index ready, first fetch pending" from a completed first ingestion.

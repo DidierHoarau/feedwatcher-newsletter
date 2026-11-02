@@ -8,6 +8,7 @@ import {
   EmailItemsBatchSave,
 } from "./emails/EmailsData";
 import { IdleWatcherGetState } from "./emails/IdleWatcher";
+import { SanitizedBodyCacheGet } from "./emails/SanitizedBodyCache";
 import { FeedIdentityInit } from "./feeds/FeedIdentity";
 import {
   ServerStatusGet,
@@ -60,6 +61,7 @@ describe("ServerStatusGet", () => {
       uidvalidity: 0,
       recordCount: 0,
       idle: { enabled: false, connected: false },
+      sanitizedBodyCache: { entries: 0, bytes: 0 },
       lastError: null,
     });
   });
@@ -78,6 +80,22 @@ describe("ServerStatusGet", () => {
     expect(status.lastUid).toBe(12);
     expect(status.uidvalidity).toBe(7);
     expect(status.recordCount).toBe(2);
+  });
+
+  it("reports the sanitized-body cache size", () => {
+    const item = makeItem();
+    EmailItemsBatchSave([item]);
+    expect(ServerStatusGet().sanitizedBodyCache).toEqual({
+      entries: 0,
+      bytes: 0,
+    });
+
+    const sanitized = SanitizedBodyCacheGet(item);
+
+    expect(ServerStatusGet().sanitizedBodyCache).toEqual({
+      entries: 1,
+      bytes: (sanitized.html.length + sanitized.summary.length) * 2,
+    });
   });
 
   it("passes the IDLE connection state through", () => {

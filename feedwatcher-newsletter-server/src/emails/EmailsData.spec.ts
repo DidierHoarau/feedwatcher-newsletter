@@ -15,7 +15,6 @@ import {
   EmailItemsBatchSave,
   EmailItemsGetExistingIds,
   EmailItemsListById,
-  EmailSendersListAll,
   EmailsDataPurgeExpired,
 } from "./EmailsData";
 import { EmailItem } from "./EmailFetcher";
@@ -258,9 +257,6 @@ describe("in-memory index", () => {
       expect(EmailItemsListById("thedaily")).toHaveLength(1);
       expect(EmailItemGetById("aaaaaaaa-1111-4111-8111-111111111111")).toBeDefined();
       expect(EmailItemsGetExistingIds()).toEqual(new Set(["<msg-1@example.com>"]));
-      expect(EmailSendersListAll()).toEqual([
-        { senderName: "The Daily", senderEmail: "news@example.com" },
-      ]);
     } finally {
       fs.renameSync(movedPath, journalPath);
     }
@@ -404,7 +400,7 @@ describe("journal store", () => {
     expect(() => EmailsDataInit(7, dataDir)).toThrow();
   });
 
-  it("purges expired items and compacts the journal to one line per message", () => {
+  it("purges expired items and compacts the journal to one line per message", async () => {
     EmailItemsBatchSave([
       makeItem({
         messageId: "<old@example.com>",
@@ -413,7 +409,7 @@ describe("journal store", () => {
       }),
       makeItem({ messageId: "<new@example.com>" }),
     ]);
-    EmailsDataPurgeExpired();
+    await EmailsDataPurgeExpired();
     const lines = fs
       .readFileSync(journalPath, "utf8")
       .split("\n")
@@ -422,7 +418,7 @@ describe("journal store", () => {
     expect(EmailItemsGetExistingIds()).toEqual(new Set(["<new@example.com>"]));
   });
 
-  it("purges expired items from feeds, permalinks and the sanitized cache", () => {
+  it("purges expired items from feeds, permalinks and the sanitized cache", async () => {
     const expiredId = "dddddddd-1111-4111-8111-111111111111";
     const expired = makeItem({
       id: expiredId,
@@ -434,7 +430,7 @@ describe("journal store", () => {
     SanitizedBodyCacheGet(expired);
     expect(SanitizedBodyCacheStats().entries).toBe(1);
 
-    EmailsDataPurgeExpired();
+    await EmailsDataPurgeExpired();
 
     expect(EmailItemsListById("thedaily").map((item) => item.messageId)).toEqual([
       "<new@example.com>",
@@ -444,7 +440,7 @@ describe("journal store", () => {
     expect(SanitizedBodyCacheStats().entries).toBe(0);
   });
 
-  it("compacts duplicate records keeping only the last record per message", () => {
+  it("compacts duplicate records keeping only the last record per message", async () => {
     EmailItemsBatchSave([makeItem({ messageId: "<dup@example.com>" })]);
     EmailItemsBatchSave([
       makeItem({
@@ -459,7 +455,7 @@ describe("journal store", () => {
         dateCreated: "2020-01-01T00:00:00.000Z",
       }),
     ]);
-    EmailsDataPurgeExpired();
+    await EmailsDataPurgeExpired();
     const lines = fs
       .readFileSync(journalPath, "utf8")
       .split("\n")
@@ -469,20 +465,20 @@ describe("journal store", () => {
     expect(EmailItemsGetExistingIds()).toEqual(new Set(["<dup@example.com>"]));
   });
 
-  it("leaves the index unchanged when the purge aborts", () => {
+  it("leaves the index unchanged when the purge aborts", async () => {
     seedLargeJournal();
     const before = fs.readFileSync(journalPath);
     readSyncMock.mockImplementation(() => {
       throw new Error("simulated read failure");
     });
-    EmailsDataPurgeExpired();
+    await EmailsDataPurgeExpired();
     expect(fs.readFileSync(journalPath).equals(before)).toBe(true);
     expect(fs.existsSync(`${journalPath}.tmp`)).toBe(false);
     expect(EmailItemsGetExistingIds().has("<expired@example.com>")).toBe(true);
     expect(EmailFeedsListAll()).toHaveLength(1);
   });
 
-  it("aborts the purge without touching the journal on a second-pass read error", () => {
+  it("aborts the purge without touching the journal on a second-pass read error", async () => {
     seedLargeJournal();
     const before = fs.readFileSync(journalPath);
     readSyncMock.mockImplementation((...args: unknown[]) => {
@@ -492,9 +488,46 @@ describe("journal store", () => {
       }
       return (actualFse.readSync as (...a: unknown[]) => number)(...args);
     });
-    EmailsDataPurgeExpired();
+    await EmailsDataPurgeExpired();
     expect(fs.readFileSync(journalPath).equals(before)).toBe(true);
     expect(fs.existsSync(`${journalPath}.tmp`)).toBe(false);
+  });
+
+  it("yields to the event loop while compacting a large journal", async () => {
+    seedLargeJournal();
+    let resolved = false;
+    const purge = EmailsDataPurgeExpired().then(() => {
+      resolved = true;
+    });
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    // A multi-chunk compaction is still running after the first event-loop
+    // turn: the rewrite yields between 1 MiB reads instead of blocking.
+    expect(resolved).toBe(false);
+
+    await purge;
+    expect(resolved).toBe(true);
+    expect(EmailItemsGetExistingIds().has("<expired@example.com>")).toBe(false);
+    expect(EmailsDataGetRecordCount()).toBe(2400);
+  });
+
+  it("logs the measured purge duration", async () => {
+    EmailItemsBatchSave([
+      makeItem({
+        messageId: "<old@example.com>",
+        dateReceived: "2020-01-01T00:00:00.000Z",
+        dateCreated: "2020-01-01T00:00:00.000Z",
+      }),
+      makeItem({ messageId: "<new@example.com>" }),
+    ]);
+
+    await EmailsDataPurgeExpired();
+
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /^Purged 1 expired email\(s\) older than 7 day\(s\) in \d+ms$/,
+      ),
+    );
   });
 });
 
@@ -565,7 +598,7 @@ describe("EmailsDataGetRecordCount", () => {
     expect(EmailsDataGetRecordCount()).toBe(2);
   });
 
-  it("drops purged messages from the count", () => {
+  it("drops purged messages from the count", async () => {
     EmailItemsBatchSave([
       makeItem({
         messageId: "<old@example.com>",
@@ -579,14 +612,14 @@ describe("EmailsDataGetRecordCount", () => {
     ]);
     expect(EmailsDataGetRecordCount()).toBe(2);
 
-    EmailsDataPurgeExpired();
+    await EmailsDataPurgeExpired();
 
     expect(EmailsDataGetRecordCount()).toBe(1);
   });
 });
 
 describe("retention and sender-controlled dates", () => {
-  it("keeps an email with an old Date header for the full window from ingestion", () => {
+  it("keeps an email with an old Date header for the full window from ingestion", async () => {
     EmailItemsBatchSave([
       makeItem({
         messageId: "<old-header@example.com>",
@@ -594,14 +627,14 @@ describe("retention and sender-controlled dates", () => {
       }),
     ]);
 
-    EmailsDataPurgeExpired();
+    await EmailsDataPurgeExpired();
 
     expect(EmailItemsGetExistingIds()).toEqual(
       new Set(["<old-header@example.com>"]),
     );
   });
 
-  it("keeps an email created exactly at the cutoff and purges one ms older", () => {
+  it("keeps an email created exactly at the cutoff and purges one ms older", async () => {
     const fixedNow = Date.parse("2026-06-01T00:00:00.000Z");
     const cutoff = fixedNow - 7 * 24 * 60 * 60 * 1000;
     EmailItemsBatchSave([
@@ -618,7 +651,7 @@ describe("retention and sender-controlled dates", () => {
 
     const nowSpy = jest.spyOn(Date, "now").mockReturnValue(fixedNow);
     try {
-      EmailsDataPurgeExpired();
+      await EmailsDataPurgeExpired();
     } finally {
       nowSpy.mockRestore();
     }
@@ -628,7 +661,7 @@ describe("retention and sender-controlled dates", () => {
     );
   });
 
-  it("treats a record without a parsable ingestion date as expired", () => {
+  it("treats a record without a parsable ingestion date as expired", async () => {
     EmailItemsBatchSave([
       makeItem({ messageId: "<no-created@example.com>", dateCreated: "not-a-date" }),
       makeItem({
@@ -637,7 +670,7 @@ describe("retention and sender-controlled dates", () => {
       }),
     ]);
 
-    EmailsDataPurgeExpired();
+    await EmailsDataPurgeExpired();
 
     expect(EmailItemsGetExistingIds()).toEqual(new Set(["<live@example.com>"]));
   });

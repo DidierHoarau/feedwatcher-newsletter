@@ -1,9 +1,9 @@
 import { Span } from "@opentelemetry/api";
 import * as schedule from "node-schedule";
 import { Config } from "./Config";
-import { SchedulerInit, SchedulerReload } from "./Scheduler";
+import { SchedulerInit, SchedulerReload, SchedulerStop, SchedulerTriggerFetch } from "./Scheduler";
 import { EmailFetcherFetchEmails } from "./emails/EmailFetcher";
-import { IdleWatcherStart } from "./emails/IdleWatcher";
+import { IdleWatcherStart, IdleWatcherStop } from "./emails/IdleWatcher";
 import {
   EmailsDataPurgeExpired,
   EmailsDataSetRetentionDays,
@@ -17,6 +17,7 @@ jest.mock("./emails/EmailFetcher", () => ({
 }));
 jest.mock("./emails/IdleWatcher", () => ({
   IdleWatcherStart: jest.fn(),
+  IdleWatcherStop: jest.fn(),
 }));
 jest.mock("./emails/EmailsData", () => ({
   EmailsDataInit: jest.fn(),
@@ -53,6 +54,8 @@ jest.mock("./OTelContext", () => {
 
 const fetchMock = EmailFetcherFetchEmails as unknown as jest.Mock;
 const idleStartMock = IdleWatcherStart as unknown as jest.Mock;
+const idleStopMock = IdleWatcherStop as unknown as jest.Mock;
+const purgeMock = EmailsDataPurgeExpired as unknown as jest.Mock;
 const scheduleJobMock = schedule.scheduleJob as unknown as jest.Mock;
 const feedsMock = EmailFeedsListAll as unknown as jest.Mock;
 const pruneTokensMock = FeedIdentityPruneTokens as unknown as jest.Mock;
@@ -107,6 +110,7 @@ beforeEach(() => {
   jest.resetAllMocks();
   startSpanMock.mockImplementation(() => ({ end: jest.fn() }));
   fetchMock.mockResolvedValue(undefined);
+  purgeMock.mockResolvedValue(undefined);
   feedsMock.mockReturnValue([]);
   timeoutMock.mockResolvedValue(undefined);
   scheduleJobMock.mockImplementation(() => ({ cancel: jest.fn() }));
@@ -148,12 +152,56 @@ describe("SchedulerInit", () => {
     const cronCallback = scheduleJobMock.mock.calls[0][1];
     await flushAsync();
     fetchMock.mockClear();
-    (EmailsDataPurgeExpired as unknown as jest.Mock).mockClear();
+    purgeMock.mockClear();
+    const purge = deferred();
+    purgeMock.mockReturnValueOnce(purge.promise);
 
     cronCallback();
     await flushAsync();
 
-    expect(EmailsDataPurgeExpired).toHaveBeenCalledTimes(1);
+    expect(purgeMock).toHaveBeenCalledTimes(1);
+    // The fetch must not start while the compaction is still running.
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    purge.resolve();
+    await flushAsync();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips the cron purge and fetch while a fetch is already in flight", async () => {
+    const startupFetch = deferred();
+    fetchMock.mockReturnValueOnce(startupFetch.promise);
+    await SchedulerInit(makeSpan(), makeConfig());
+    const cronCallback = scheduleJobMock.mock.calls[0][1];
+    fetchMock.mockClear();
+    purgeMock.mockClear();
+
+    cronCallback();
+    await flushAsync();
+
+    expect(purgeMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    startupFetch.resolve();
+    await flushAsync();
+  });
+
+  it("logs a purge failure and still runs the cron fetch", async () => {
+    await SchedulerInit(makeSpan(), makeConfig());
+    const cronCallback = scheduleJobMock.mock.calls[0][1];
+    await flushAsync();
+    fetchMock.mockClear();
+    purgeMock.mockRejectedValueOnce(new Error("purge failed"));
+
+    expect(cronCallback()).toBeUndefined();
+    await flushAsync();
+
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      "Error purging expired emails",
+      expect.objectContaining({ message: "purge failed" }),
+      expect.anything(),
+    );
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -249,35 +297,61 @@ describe("SchedulerReload", () => {
     expect(scheduleJobMock).toHaveBeenCalledTimes(1);
   });
 
-  it("warns about restart-only changes", async () => {
+  it("does not warn about restart-only fields when IMAP settings change", async () => {
     await SchedulerInit(makeSpan(), makeConfig());
     await flushAsync();
 
     const config = makeConfig();
     config.IMAP_HOST = "new-host.example.com";
-    SchedulerReload(config);
-
-    expect(mockLogger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("IMAP_HOST"),
-    );
-    expect(mockLogger.warn).not.toHaveBeenCalledWith(
-      expect.stringContaining("IMAP_PASSWORD"),
-    );
-  });
-
-  it("warns when the IMAP TLS settings change", async () => {
-    await SchedulerInit(makeSpan(), makeConfig());
-    await flushAsync();
-
-    const config = makeConfig();
+    config.IMAP_USER = "other@example.com";
+    config.IMAP_PASSWORD = "new-secret";
+    config.IMAP_TLS = false;
     config.IMAP_TLS_INSECURE = true;
     config.IMAP_TLS_CA_FILE = "/certs/private-ca.pem";
     SchedulerReload(config);
 
+    expect(mockLogger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining("requires a restart"),
+    );
+  });
+
+  it("warns when DATA_DIR changes", async () => {
+    await SchedulerInit(makeSpan(), makeConfig());
+    await flushAsync();
+
+    const config = makeConfig();
+    config.DATA_DIR = "/other-data";
+    SchedulerReload(config);
+
     expect(mockLogger.warn).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "IMAP_TLS_INSECURE, IMAP_TLS_CA_FILE",
-      ),
+      expect.stringContaining("DATA_DIR"),
+    );
+  });
+
+  it("warns when API_PORT or TRUST_PROXY changes", async () => {
+    await SchedulerInit(makeSpan(), makeConfig());
+    await flushAsync();
+
+    const config = makeConfig();
+    config.API_PORT = 9090;
+    config.TRUST_PROXY = true;
+    SchedulerReload(config);
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("API_PORT, TRUST_PROXY"),
+    );
+  });
+
+  it("warns when an OpenTelemetry exporter setting changes", async () => {
+    await SchedulerInit(makeSpan(), makeConfig());
+    await flushAsync();
+
+    const config = makeConfig();
+    config.OPENTELEMETRY_COLLECTOR_HTTP_TRACES = "http://otel:4318/v1/traces";
+    SchedulerReload(config);
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("OPENTELEMETRY_COLLECTOR_HTTP_TRACES"),
     );
   });
 });
@@ -392,5 +466,71 @@ describe("feed token ensure passes", () => {
     );
     expect(recordSuccessMock).toHaveBeenCalledTimes(1);
     expect(recordErrorMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("SchedulerStop", () => {
+  it("cancels the cron job, stops IDLE and waits for the in-flight fetch", async () => {
+    const startupFetch = deferred();
+    fetchMock.mockReturnValueOnce(startupFetch.promise);
+    await SchedulerInit(makeSpan(), makeConfig());
+    const job = scheduleJobMock.mock.results[0].value;
+
+    let stopped = false;
+    const stop = SchedulerStop().then(() => {
+      stopped = true;
+    });
+
+    expect(job.cancel).toHaveBeenCalledTimes(1);
+    expect(idleStopMock).toHaveBeenCalledTimes(1);
+    await flushAsync();
+    // The shutdown waits for the fetch that was already running...
+    expect(stopped).toBe(false);
+
+    startupFetch.resolve();
+    await stop;
+    expect(stopped).toBe(true);
+  });
+
+  it("bounds the wait for in-flight work", async () => {
+    const startupFetch = deferred();
+    fetchMock.mockReturnValueOnce(startupFetch.promise);
+    await SchedulerInit(makeSpan(), makeConfig());
+
+    // A zero timeout resolves immediately even though the fetch is pending.
+    await expect(SchedulerStop(0)).resolves.toBeUndefined();
+
+    startupFetch.resolve();
+    await flushAsync();
+  });
+
+  it("is idempotent", async () => {
+    await SchedulerInit(makeSpan(), makeConfig());
+    await flushAsync();
+
+    const first = SchedulerStop();
+    const second = SchedulerStop();
+
+    expect(second).toBe(first);
+    await first;
+    expect(idleStopMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips new triggers after a stop", async () => {
+    await SchedulerInit(makeSpan(), makeConfig());
+    await flushAsync();
+    const cronCallback = scheduleJobMock.mock.calls[0][1];
+    const idleCallback = idleStartMock.mock.calls[0][1];
+    await SchedulerStop();
+    fetchMock.mockClear();
+    purgeMock.mockClear();
+
+    cronCallback();
+    idleCallback();
+    await SchedulerTriggerFetch("startup", makeSpan());
+    await flushAsync();
+
+    expect(purgeMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

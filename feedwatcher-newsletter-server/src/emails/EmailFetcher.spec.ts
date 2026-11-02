@@ -490,7 +490,14 @@ describe("EmailFetcherFetchEmails — sender-controlled dates", () => {
     await EmailFetcherFetchEmails(contextSpan, makeConfig());
 
     const saved = batchSaveMock.mock.calls[0][0][0];
-    expect(saved.dateReceived).toBe(saved.dateCreated);
+    // mailparser replaces an unparseable Date header with its own parse
+    // timestamp, which can tick over to the previous millisecond before the
+    // item's ingestion timestamp is captured: compare within a small window
+    // instead of requiring exact equality.
+    const received = Date.parse(saved.dateReceived);
+    const created = Date.parse(saved.dateCreated);
+    expect(received).toBeLessThanOrEqual(created);
+    expect(created - received).toBeLessThan(1000);
   });
 
   it("falls back to the ingestion time when the Date header is absent", async () => {
