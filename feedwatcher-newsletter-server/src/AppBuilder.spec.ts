@@ -737,6 +737,7 @@ describe("status route", () => {
         "uidvalidity",
         "recordCount",
         "idle",
+        "sanitizedBodyCache",
         "lastError",
       ].sort(),
     );
@@ -862,7 +863,7 @@ describe("conditional GET", () => {
     expect(before.body).toContain("Old Sender");
     const etag = before.headers.etag as string;
 
-    EmailsDataPurgeExpired();
+    await EmailsDataPurgeExpired();
 
     const after = await fastify.inject({
       method: "GET",
