@@ -106,9 +106,13 @@ export class Config extends ConfigBase {
 
   constructor() {
     super("feedwatcher-newsletter-server");
-    // An explicit VERSION env/config value still wins: reload() only
-    // overwrites VERSION when one is supplied.
     this.VERSION = detectServerVersion();
+    // ConfigBase registers VERSION with the shared library's own version as
+    // the captured default, and reload() resets every registered field to that
+    // default before applying env/file values. Re-registering after the
+    // assignment makes the service version the default; an explicit VERSION
+    // env/config value still wins because it is applied after the reset.
+    this.addConfigField({ field: "VERSION" });
     this.addConfigField({ field: "IMAP_HOST" });
     this.addConfigField({ field: "IMAP_PORT" });
     this.addConfigField({ field: "IMAP_TLS" });
