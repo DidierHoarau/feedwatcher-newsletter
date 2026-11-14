@@ -179,4 +179,28 @@ describe("Config.reloadAtomic", () => {
     });
     expect(config.IMAP_PORT).toBe(993);
   });
+
+  it("keeps the service version across a reload", async () => {
+    const serverPkg = JSON.parse(
+      fs.readFileSync(path.resolve(__dirname, "../package.json"), "utf8"),
+    );
+    const config = new Config();
+    writeConfig({ IMAP_HOST: "imap2.example.com" });
+
+    await config.reloadAtomic();
+
+    // common-utils >= 2.7.0 resets registered fields to their captured
+    // default before applying the file/env layers: without re-registering
+    // VERSION, the shared library's own version would take over here.
+    expect(config.VERSION).toBe(serverPkg.version);
+  });
+
+  it("lets an explicit VERSION value override the detected service version", async () => {
+    const config = new Config();
+    writeConfig({ VERSION: "9.9.9" });
+
+    await config.reloadAtomic();
+
+    expect(config.VERSION).toBe("9.9.9");
+  });
 });
