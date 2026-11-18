@@ -9,13 +9,24 @@ import { Config } from "../Config";
 import {
   EmailsDataGetFeedLastModified,
   EmailsDataGetLastModified,
+  EmailItemGetEffectiveDateReceived,
+  EmailItemsListById,
 } from "../emails/EmailsData";
-import { FeedIdentityResolveFeedUrlId } from "../feeds/FeedIdentity";
-import { FeedListingGetBaseUrl, FeedListingGetFeeds } from "../feeds/FeedListing";
+import { SanitizedBodyCacheGet } from "../emails/SanitizedBodyCache";
+import {
+  FeedIdentityGetFeedUrlId,
+  FeedIdentityGetTitle,
+  FeedIdentityResolveFeedUrlId,
+} from "../feeds/FeedIdentity";
+import {
+  FeedListingGetBaseUrl,
+  FeedListingGetFeeds,
+  FeedListingServedItemCount,
+} from "../feeds/FeedListing";
 import { OpmlGeneratorBuild } from "../feeds/OpmlGenerator";
 import { RssFeedGeneratorBuildFeedById } from "../emails/RssFeedGenerator";
 import { HttpConditionalSend } from "./HttpConditional";
-import { renderFeedsIndexPage } from "./HtmlPages";
+import { renderFeedArchivePage, renderFeedsIndexPage } from "./HtmlPages";
 
 const logger = OTelLogger().createModuleLogger("RssRoutes");
 
@@ -36,10 +47,12 @@ export class RssRoutes {
             body: renderFeedsIndexPage(
               feeds.map((f) => ({
                 feedUrl: f.feedUrl,
+                archiveUrl: f.archiveUrl,
                 title: f.title,
                 senderName: f.senderName,
                 senderEmail: f.senderEmail,
                 itemCount: f.itemCount,
+                servedItemCount: f.servedItemCount,
                 latestDate: f.latestDate,
               })),
             ),
@@ -114,6 +127,7 @@ export class RssRoutes {
           baseUrl,
           this.config.EMAIL_STRIP_TRACKING_PIXELS,
           this.config.EMAIL_BLOCK_REMOTE_IMAGES,
+          this.config.FEED_MAX_ITEMS,
         );
         if (xml === undefined) {
           logger.info(`Unknown feed id: ${resolved.feedId}`, span);
@@ -124,6 +138,60 @@ export class RssRoutes {
         return HttpConditionalSend(request, reply, {
           body: xml,
           contentType: "application/rss+xml; charset=utf-8",
+          lastModifiedMs: EmailsDataGetFeedLastModified(resolved.feedId),
+        });
+      }),
+    );
+
+    // Per-feed HTML archive: every retained email, newest first, with the same
+    // auth scope and token rules as the feed. The RSS feed is the capped window.
+    fastify.get<{ Params: { id: string } }>("/:id/archive", async (request, reply) =>
+      OTelRunWithRequestContext(request, async () => {
+        const span = OTelRequestSpan(request) as Span;
+        const resolved = FeedIdentityResolveFeedUrlId(request.params.id);
+        if (!resolved.valid) {
+          // Never log the URL id: it may carry a feed token.
+          logger.info(`Invalid feed token for feed: ${resolved.feedId}`, span);
+          reply.code(404);
+          return reply.send({ error: "Feed not found" });
+        }
+        const items = EmailItemsListById(resolved.feedId);
+        if (items.length === 0) {
+          logger.info(`Unknown feed id: ${resolved.feedId}`, span);
+          reply.code(404);
+          return reply.send({ error: "Feed not found" });
+        }
+        const baseUrl = FeedListingGetBaseUrl(this.config, request);
+        const feedUrl = `${baseUrl}/rss/${FeedIdentityGetFeedUrlId(resolved.feedId)}`;
+        const archiveItems = items.map((item) => ({
+          id: item.id,
+          subject: item.subject,
+          date: EmailItemGetEffectiveDateReceived(item),
+          senderName: item.senderName,
+          senderEmail: item.senderEmail,
+          summary: SanitizedBodyCacheGet(
+            item,
+            this.config.EMAIL_STRIP_TRACKING_PIXELS,
+            this.config.EMAIL_BLOCK_REMOTE_IMAGES,
+          ).summary,
+        }));
+        return HttpConditionalSend(request, reply, {
+          body: renderFeedArchivePage(
+            {
+              title: FeedIdentityGetTitle(
+                items[0].senderName,
+                items[0].senderEmail,
+              ),
+              feedUrl,
+              archiveUrl: `${feedUrl}/archive`,
+            },
+            archiveItems,
+            FeedListingServedItemCount(
+              this.config.FEED_MAX_ITEMS,
+              items.length,
+            ),
+          ),
+          contentType: "text/html; charset=utf-8",
           lastModifiedMs: EmailsDataGetFeedLastModified(resolved.feedId),
         });
       }),

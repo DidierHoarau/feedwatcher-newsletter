@@ -8,10 +8,12 @@ export interface ViewPageNavigation {
 
 interface FeedForIndex {
   feedUrl: string;
+  archiveUrl: string;
   title: string;
   senderName: string;
   senderEmail: string;
   itemCount: number;
+  servedItemCount: number;
   latestDate: string;
 }
 
@@ -72,6 +74,7 @@ const SHARED_CSS = `
   }
   .feed-card h2 { font-size: 1.05rem; margin: 0; }
   .feed-card .meta { color: var(--text-muted); font-size: 0.85rem; grid-column: 1; }
+  .feed-card .meta a.archive { margin-left: 0.35rem; }
   .feed-url {
     grid-column: 1 / -1;
     display: flex;
@@ -117,6 +120,23 @@ const SHARED_CSS = `
     margin: 0 0 1rem;
   }
   .back { display: inline-block; margin-bottom: 1rem; }
+  .archive-list {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+    list-style: none;
+    padding: 0;
+    margin: 1.5rem 0 0;
+  }
+  .archive-item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem 1.25rem;
+  }
+  .archive-item h2 { font-size: 1.05rem; margin: 0 0 0.25rem; }
+  .archive-item .meta { color: var(--text-muted); font-size: 0.85rem; margin: 0; }
+  .archive-item .summary { margin: 0.5rem 0 0; }
 `;
 
 // Inline copy-to-clipboard script. Its exact text is hashed for the CSP, so
@@ -145,17 +165,23 @@ export function renderFeedsIndexPage(feeds: FeedForIndex[]): string {
     )
     .join("\n");
   const items = feeds
-    .map(
-      (feed) => `
+    .map((feed) => {
+      // The feed serves a bounded window; the count says how many of the
+      // retained emails it actually carries, and the archive covers the rest.
+      const countText =
+        feed.servedItemCount < feed.itemCount
+          ? `${feed.servedItemCount} of ${feed.itemCount} email(s) in the feed`
+          : `${feed.itemCount} email(s)`;
+      return `
     <li class="feed-card">
       <h2>${escapeHtml(feed.title)}</h2>
-      <span class="meta">${escapeHtml(feed.senderEmail)} · ${feed.itemCount} email(s)</span>
+      <span class="meta">${escapeHtml(feed.senderEmail)} · ${countText} · <a class="archive" href="${escapeHtml(feed.archiveUrl)}">Archive</a></span>
       <div class="feed-url">
         <code>${escapeHtml(feed.feedUrl)}</code>
         <button type="button" class="copy" data-url="${escapeHtml(feed.feedUrl)}">Copy</button>
       </div>
-    </li>`,
-    )
+    </li>`;
+    })
     .join("\n");
   return `<!DOCTYPE html>
 <html lang="en">
@@ -179,6 +205,66 @@ ${discoveryLinks}
 `;
 }
 
+export interface FeedArchiveFeed {
+  title: string;
+  feedUrl: string;
+  archiveUrl: string;
+}
+
+export interface FeedArchiveItem {
+  id: string;
+  subject: string;
+  date: string;
+  senderName: string;
+  senderEmail: string;
+  summary: string;
+}
+
+// Per-feed archive: every retained email, newest first. The RSS feed is the
+// capped recent window; this page is the complete browsable record. No script,
+// so the page reuses the same hash-based CSP as the index and the view.
+export function renderFeedArchivePage(
+  feed: FeedArchiveFeed,
+  items: FeedArchiveItem[],
+  servedItemCount: number,
+): string {
+  const listItems = items
+    .map(
+      (item) => `
+    <li class="archive-item">
+      <h2><a href="/view/${encodeURIComponent(item.id)}">${escapeHtml(
+        item.subject,
+      )}</a></h2>
+      <p class="meta">${escapeHtml(item.senderName)} &lt;${escapeHtml(
+        item.senderEmail,
+      )}&gt; · ${escapeHtml(new Date(item.date).toUTCString())}</p>
+      <p class="summary">${escapeHtml(item.summary)}</p>
+    </li>`,
+    )
+    .join("\n");
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>FeedWatcher Newsletter — Archive: ${escapeHtml(feed.title)}</title>
+<style>${SHARED_CSS}</style>
+</head>
+<body>
+<main>
+  <a class="back" href="/rss/">&larr; All feeds</a>
+  <h1>${escapeHtml(feed.title)}</h1>
+  <p class="subtitle">${items.length} retained email(s). The RSS feed serves the newest ${servedItemCount}. <a class="rss-feed" href="${escapeHtml(
+    feed.feedUrl,
+  )}">RSS feed</a></p>
+  <ul class="archive-list">${listItems}
+  </ul>
+</main>
+</body>
+</html>
+`;
+}
+
 // Items are listed newest-first, so "previous" is the newer neighbour and
 // "next" the older one.
 function renderViewNavigation(navigation: ViewPageNavigation): string {
@@ -188,6 +274,11 @@ function renderViewNavigation(navigation: ViewPageNavigation): string {
       `<a class="nav-feed" href="${escapeHtml(
         navigation.feed.url,
       )}">Feed: ${escapeHtml(navigation.feed.title)}</a>`,
+    );
+    links.push(
+      `<a class="nav-archive" href="${escapeHtml(
+        navigation.feed.url,
+      )}/archive">Archive</a>`,
     );
   }
   if (navigation.previous) {

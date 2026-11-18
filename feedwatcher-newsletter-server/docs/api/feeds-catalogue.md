@@ -24,8 +24,10 @@ otherwise. `/api/status` stays unauthenticated for readiness probes.
       "senderName": "Morning Brew",
       "senderEmail": "brew@morningbrew.com",
       "itemCount": 12,
+      "servedItemCount": 12,
       "latestDate": "2026-10-16T08:00:00.000Z",
-      "feedUrl": "https://feedwatcher-newsletter.example.com/rss/morningbrew.9f86d081884c7d65"
+      "feedUrl": "https://feedwatcher-newsletter.example.com/rss/morningbrew.9f86d081884c7d65",
+      "archiveUrl": "https://feedwatcher-newsletter.example.com/rss/morningbrew.9f86d081884c7d65/archive"
     },
     {
       "feedId": "thedaily",
@@ -33,8 +35,10 @@ otherwise. `/api/status` stays unauthenticated for readiness probes.
       "senderName": "The Daily",
       "senderEmail": "news@example.com",
       "itemCount": 3,
+      "servedItemCount": 3,
       "latestDate": "2026-10-16T08:00:00.000Z",
-      "feedUrl": "https://feedwatcher-newsletter.example.com/rss/thedaily.2b7d1e35f0c94a18"
+      "feedUrl": "https://feedwatcher-newsletter.example.com/rss/thedaily.2b7d1e35f0c94a18",
+      "archiveUrl": "https://feedwatcher-newsletter.example.com/rss/thedaily.2b7d1e35f0c94a18/archive"
     }
   ]
 }
@@ -51,8 +55,10 @@ otherwise. `/api/status` stays unauthenticated for readiness probes.
 | `senderName`  | string | Sender display name of the feed's latest email. |
 | `senderEmail` | string | Sender address of the feed's latest email. |
 | `itemCount`   | number | Number of retained emails in the feed. |
+| `servedItemCount` | number | Number of emails the RSS feed actually serves: `min(itemCount, FEED_MAX_ITEMS)`, or `itemCount` when the cap is `0`. |
 | `latestDate`  | string | Effective received date of the latest retained email, ISO‑8601: the sender `Date` header clamped to the local ingestion time, so it is never in the future. |
 | `feedUrl`     | string | Currently advertised feed URL (`/rss/<feedId>` or `/rss/<feedId>.<token>`). |
+| `archiveUrl`  | string | HTML archive of **all retained** emails of the feed: `feedUrl` + `/archive`. Exactly as protected as `feedUrl` (same capability token / Basic auth). |
 
 Ignored senders (`SENDER_IGNORE_LIST`) and emails without a usable sender are
 never listed.
@@ -62,6 +68,9 @@ never listed.
 `version` is the contract version. Additive changes (a new field) keep the
 version; removing or renaming a field, or changing its type, bumps it. A
 consumer should check `version` and ignore fields it does not know.
+
+`servedItemCount` and `archiveUrl` are additive fields: they were introduced
+without changing the version from `1`.
 
 ## Ordering
 
@@ -90,8 +99,22 @@ gzip/brotli when the client advertises support and the body exceeds 1 KiB.
   should prefer `/api/feeds`, which is the versioned contract.
 - `GET /rss/opml` exports the same feeds as OPML 2.0, grouped under a
   `Newsletters` folder outline, ordered by `(title, feedId)`.
+- `GET /rss/:id` is the bounded feed window: it serves at most the newest
+  `FEED_MAX_ITEMS` emails of the feed.
+- `GET /rss/:id/archive` is the per-feed HTML archive: it lists **every
+  retained** email (subject, date, sender, summary), newest first, and is
+  linked from the HTML index and from `/view/:emailId`.
+- `GET /view/:emailId` permalinks every retained email.
 
 `feedId`, `title` and `itemCount` are the same values in every representation.
+
+## Feed window and archive
+
+`FEED_MAX_ITEMS` (default `200`, `0` = unlimited) caps how many emails an RSS
+feed serves: the newest ones, in their existing order. The cap only truncates
+what `/rss/:id` returns — nothing is deleted or reordered. `itemCount` and
+`archiveUrl` still cover every retained email, and retention
+(`EMAIL_RETENTION_DAYS`) remains the only mechanism that removes emails.
 
 ## Identity, overrides and private URLs
 

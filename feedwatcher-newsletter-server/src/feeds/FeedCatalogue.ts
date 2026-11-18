@@ -10,8 +10,10 @@ export interface FeedCatalogueEntry {
   senderName: string;
   senderEmail: string;
   itemCount: number;
+  servedItemCount: number;
   latestDate: string;
   feedUrl: string;
+  archiveUrl: string;
 }
 
 // Stable snapshot of the offered feeds. The body is deterministic so the ETag
@@ -24,8 +26,10 @@ export function FeedCatalogueBuild(entries: FeedListEntry[]): string {
       senderName: entry.senderName,
       senderEmail: entry.senderEmail,
       itemCount: entry.itemCount,
+      servedItemCount: entry.servedItemCount,
       latestDate: entry.latestDate,
       feedUrl: entry.feedUrl,
+      archiveUrl: entry.archiveUrl,
     }))
     .sort(
       (a, b) =>

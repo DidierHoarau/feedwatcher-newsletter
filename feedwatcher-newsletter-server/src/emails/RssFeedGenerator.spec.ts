@@ -198,8 +198,7 @@ describe("RssFeedGeneratorBuildFeedById", () => {
   });
 });
 
-describe("RssFeedGeneratorBuildFeedById — sender dates", () => {
-  it("clamps a future item date in <pubDate>", () => {
+describe("RssFeedGeneratorBuildFeedById — sender dates", () => {  it("clamps a future item date in <pubDate>", () => {
     const now = Date.now();
     const future = new Date(now + 10 * 24 * 60 * 60 * 1000).toISOString();
     const created = new Date(now - 60 * 60 * 1000).toISOString();
@@ -229,5 +228,102 @@ describe("RssFeedGeneratorBuildFeedById — sender dates", () => {
     }
     // Provenance keeps the sender's header value.
     expect(xml).toContain(`<newsletter:dateReceived>${future}</newsletter:dateReceived>`);
+  });
+});
+
+describe("RssFeedGeneratorBuildFeedById — feed window", () => {
+  let isolatedDir: string;
+  const ITEM_IDS = [
+    "50000001-0000-4000-8000-000000000001",
+    "50000002-0000-4000-8000-000000000002",
+    "50000003-0000-4000-8000-000000000003",
+    "50000004-0000-4000-8000-000000000004",
+    "50000005-0000-4000-8000-000000000005",
+  ];
+
+  function titles(xml: string): string[] {
+    return [...xml.matchAll(/<title>(?:<!\[CDATA\[)?([^<\]]*)/g)]
+      .map((match) => match[1].trim())
+      .filter((title) => title.startsWith("Cap issue"));
+  }
+
+  function guids(xml: string): string[] {
+    return [...xml.matchAll(/<guid[^>]*>([^<]+)<\/guid>/g)].map(
+      (match) => match[1],
+    );
+  }
+
+  function lastBuildDate(xml: string): string {
+    return (xml.match(/<lastBuildDate>([^<]*)<\/lastBuildDate>/) || [])[1];
+  }
+
+  function build(maxItems?: number): string {
+    return RssFeedGeneratorBuildFeedById(
+      OTelTracer().startSpan("test"),
+      "thedaily",
+      "https://svc.example.com",
+      true,
+      false,
+      maxItems,
+    ) as string;
+  }
+
+  beforeEach(() => {
+    isolatedDir = fs.mkdtempSync(path.join(os.tmpdir(), "rssgen-window-"));
+    EmailsDataInit(7, isolatedDir);
+    FeedIdentityInit({
+      ignoreList: "",
+      overrides: {},
+      privateUrls: false,
+      dataDir: isolatedDir,
+    });
+    EmailItemsBatchSave(
+      ITEM_IDS.map((id, index) =>
+        makeItem({
+          id,
+          messageId: `<cap-${index + 1}@example.com>`,
+          subject: `Cap issue ${index + 1}`,
+          body: `<p>Cap body ${index + 1}</p>`,
+          dateReceived: `2026-10-${10 + index}T08:00:00.000Z`,
+          dateCreated: `2026-10-${10 + index}T08:00:00.000Z`,
+        }),
+      ),
+    );
+  });
+
+  afterEach(() => {
+    EmailsDataInit(7, dataDir);
+    FeedIdentityInit({
+      ignoreList: "",
+      overrides: {},
+      privateUrls: false,
+      dataDir,
+    });
+  });
+
+  it("serves the newest items up to the cap, in order and without duplicates", () => {
+    const xml = build(2);
+    expect(titles(xml)).toEqual(["Cap issue 5", "Cap issue 4"]);
+    expect(guids(xml)).toEqual([ITEM_IDS[4], ITEM_IDS[3]]);
+    expect(new Set(guids(xml)).size).toBe(guids(xml).length);
+  });
+
+  it("serves every item when the cap is above the item count or unlimited", () => {
+    expect(titles(build(10))).toEqual([
+      "Cap issue 5",
+      "Cap issue 4",
+      "Cap issue 3",
+      "Cap issue 2",
+      "Cap issue 1",
+    ]);
+    expect(titles(build(5))).toHaveLength(5);
+    expect(titles(build(0))).toHaveLength(5);
+  });
+
+  it("keeps <lastBuildDate> identical for capped and uncapped builds", () => {
+    const capped = build(2);
+    const uncapped = build(0);
+    expect(lastBuildDate(capped)).toBe(lastBuildDate(uncapped));
+    expect(capped).not.toBe(uncapped);
   });
 });

@@ -27,6 +27,18 @@ describe("Config", () => {
     expect(new Config().EMAIL_BLOCK_REMOTE_IMAGES).toBe(false);
   });
 
+  it("caps feeds at 200 items by default", () => {
+    expect(new Config().FEED_MAX_ITEMS).toBe(200);
+  });
+
+  it("documents the feed window default in the README", () => {
+    const readme = fs.readFileSync(
+      path.resolve(__dirname, "../../README.md"),
+      "utf8",
+    );
+    expect(readme).toMatch(/`FEED_MAX_ITEMS`[^\n]*\|\s*`200`\s*\|/);
+  });
+
   it("documents the remote image blocking default in the README", () => {
     const readme = fs.readFileSync(
       path.resolve(__dirname, "../../README.md"),
@@ -74,6 +86,7 @@ describe("Config.reloadAtomic", () => {
     "EMAIL_FETCH_IDLE",
     "EMAIL_RETENTION_DAYS",
     "EMAIL_BLOCK_REMOTE_IMAGES",
+    "FEED_MAX_ITEMS",
     "FEED_OVERRIDES",
     "CORS_POLICY_ORIGIN",
   ];
@@ -164,6 +177,7 @@ describe("Config.reloadAtomic", () => {
       EMAIL_RETENTION_DAYS: 5,
       EMAIL_FETCH_IDLE: false,
       EMAIL_BLOCK_REMOTE_IMAGES: true,
+      FEED_MAX_ITEMS: 50,
       FEED_OVERRIDES: { "news@example.com": { feedId: "daily" } },
     });
 
@@ -174,6 +188,7 @@ describe("Config.reloadAtomic", () => {
     expect(config.EMAIL_RETENTION_DAYS).toBe(5);
     expect(config.EMAIL_FETCH_IDLE).toBe(false);
     expect(config.EMAIL_BLOCK_REMOTE_IMAGES).toBe(true);
+    expect(config.FEED_MAX_ITEMS).toBe(50);
     expect(config.FEED_OVERRIDES).toEqual({
       "news@example.com": { feedId: "daily" },
     });

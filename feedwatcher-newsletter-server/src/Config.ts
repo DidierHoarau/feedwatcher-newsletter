@@ -83,6 +83,10 @@ export class Config extends ConfigBase {
   // because bare-id subscriptions stop working.
   public FEED_PRIVATE_URLS_STRICT = false;
 
+  // Feed window: max emails served per RSS feed, newest first (0 = unlimited).
+  // Retention still decides what is stored; the archive lists everything retained.
+  public FEED_MAX_ITEMS = 200;
+
   // Access control: optional HTTP Basic auth protecting /, /rss/* and /view/*.
   // Enabled when AUTH_PASSWORD is non-empty; disabled by default.
   public AUTH_USERNAME = "feedwatcher";
@@ -135,6 +139,7 @@ export class Config extends ConfigBase {
     this.addConfigField({ field: "EMAIL_BLOCK_REMOTE_IMAGES" });
     this.addConfigField({ field: "FEED_PRIVATE_URLS" });
     this.addConfigField({ field: "FEED_PRIVATE_URLS_STRICT" });
+    this.addConfigField({ field: "FEED_MAX_ITEMS" });
     this.addConfigField({ field: "AUTH_USERNAME" });
     this.addConfigField({ field: "AUTH_PASSWORD", sensitive: true });
     this.addConfigField({ field: "TRUST_PROXY" });

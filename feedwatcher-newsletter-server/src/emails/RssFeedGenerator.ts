@@ -13,6 +13,7 @@ export function RssFeedGeneratorBuildFeedById(
   baseUrl: string,
   stripTrackingPixels = true,
   blockRemoteImages = false,
+  maxItems = 0,
 ): string | undefined {
   const span = OTelTracer().startSpan("RssFeedGeneratorBuildFeedById", context);
   try {
@@ -39,7 +40,10 @@ export function RssFeedGeneratorBuildFeedById(
       },
     });
 
-    for (const email of emails) {
+    // Items are already newest-first: truncating the head never reorders or
+    // duplicates them. The archive and retention remain the complete record.
+    const servedEmails = maxItems > 0 ? emails.slice(0, maxItems) : emails;
+    for (const email of servedEmails) {
       const sanitizedBody = SanitizedBodyCacheGet(
         email,
         stripTrackingPixels,
