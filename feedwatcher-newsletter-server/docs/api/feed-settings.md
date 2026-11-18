@@ -6,8 +6,9 @@ tokens. They are stored in `DATA_DIR/feed-settings.json`, applied immediately
 and hot-reloaded, and exposed through a JSON API and a server-rendered form.
 
 Authentication matches the rest of the product: when `AUTH_PASSWORD` is
-non-empty, `/manage`, `GET /api/feeds/settings` and `PUT /api/feeds/settings`
-require HTTP Basic credentials. `/api/status` stays open.
+non-empty, `/manage`, `GET /api/feeds/settings`, `PUT /api/feeds/settings` and
+the other content pages (including `/status`) require HTTP Basic credentials.
+`/api/status` stays open.
 
 ## Document
 

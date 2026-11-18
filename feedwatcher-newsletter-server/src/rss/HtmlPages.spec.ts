@@ -4,6 +4,7 @@ import {
   renderFeedArchivePage,
   renderFeedsIndexPage,
   renderManagePage,
+  renderStatusPage,
   renderViewPage,
 } from "./HtmlPages";
 
@@ -371,5 +372,217 @@ describe("renderManagePage", () => {
     expect(renderManagePage(makeModel({ saved: true }))).toContain(
       "Feed settings saved and applied",
     );
+  });
+});
+
+describe("renderFeedsIndexPage: activity, filter and preview", () => {
+  it("shows the last-email date and marks a quiet feed", () => {
+    const html = renderFeedsIndexPage([
+      makeFeed({ latestDate: "2026-10-16T08:00:00.000Z", quiet: true }),
+    ]);
+    expect(html).toContain("Last email Fri, 16 Oct 2026 08:00:00 GMT");
+    expect(html).toContain('class="badge quiet"');
+    expect(html).toContain("Quiet 7+ days");
+    expect(html).toContain("All 2 retained email(s)");
+  });
+
+  it("omits the quiet badge for an active feed", () => {
+    const html = renderFeedsIndexPage([makeFeed({ quiet: false })]);
+    expect(html).not.toContain('class="badge quiet"');
+  });
+
+  it("renders a server-side GET filter without JavaScript", () => {
+    const html = renderFeedsIndexPage([makeFeed()]);
+    expect(html).toContain('<form class="filter-form" method="get" action="/rss/"');
+    expect(html).toContain('<label for="feed-filter">Filter feeds</label>');
+    expect(html).toContain(
+      '<input id="feed-filter" type="search" name="q" value=""',
+    );
+    expect(html).not.toContain('class="clear-filter"');
+  });
+
+  it("reports the filtered count, keeps the query and offers a clear link", () => {
+    const html = renderFeedsIndexPage([makeFeed()], {
+      query: "daily",
+      totalCount: 12,
+    });
+    expect(html).toContain("Showing 1 of 12 feed(s) matching");
+    expect(html).toContain('value="daily"');
+    expect(html).toContain('<a class="clear-filter" href="/rss/">Clear filter</a>');
+  });
+
+  it("renders an empty filter state and escapes the query", () => {
+    const html = renderFeedsIndexPage([], {
+      query: '<script>alert(1)</script>',
+      totalCount: 3,
+    });
+    expect(html).toContain("No feed matches");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(html).toContain("Showing 0 of 3 feed(s)");
+  });
+
+  it("renders an escaped banner linking to the status page", () => {
+    const html = renderFeedsIndexPage([makeFeed()], {
+      banner: 'Ingestion is degraded: <script>bad</script> failed',
+    });
+    expect(html).toContain('class="banner" role="status"');
+    expect(html).toContain(
+      "Ingestion is degraded: &lt;script&gt;bad&lt;/script&gt; failed",
+    );
+    expect(html).toContain('<a href="/status">Ingestion status</a>');
+    expect(html).not.toContain("<script>bad</script>");
+  });
+
+  it("renders the newest items as a preview distinct from the archive", () => {
+    const html = renderFeedsIndexPage([
+      makeFeed({
+        preview: [
+          {
+            id: "22222222-2222-4222-8222-222222222222",
+            subject: "Newer issue",
+            date: "2026-10-16T08:00:00.000Z",
+            summary: "Newer summary",
+          },
+          {
+            id: "11111111-1111-4111-8111-111111111111",
+            subject: "<b>Older</b> issue",
+            date: "2026-10-15T08:00:00.000Z",
+            summary: "Older & summary",
+          },
+        ],
+      }),
+    ]);
+    expect(html).toContain('<p class="preview-title">Latest issues</p>');
+    expect(html).toContain(
+      '<a href="/view/22222222-2222-4222-8222-222222222222">Newer issue</a>',
+    );
+    expect(html).toContain("Newer summary");
+    expect(html).toContain("&lt;b&gt;Older&lt;/b&gt; issue");
+    expect(html).toContain("Older &amp; summary");
+    expect(html).not.toContain("<b>Older</b>");
+    expect(html).toContain("All 2 retained email(s)");
+  });
+
+  it("omits the preview block when a feed has no preview items", () => {
+    const html = renderFeedsIndexPage([makeFeed()]);
+    expect(html).not.toContain("Latest issues");
+  });
+
+  it("keeps visible focus styles and the copy script", () => {
+    const html = renderFeedsIndexPage([makeFeed()]);
+    expect(html).toContain(":focus-visible");
+    expect(html).toContain(`<script>${COPY_SCRIPT}</script>`);
+  });
+});
+
+describe("renderStatusPage", () => {
+  function makeModel(overrides: {
+    health?: Record<string, unknown>;
+    serverStatus?: Record<string, unknown>;
+    cron?: string;
+  } = {}) {
+    return {
+      serverStatus: {
+        started: true,
+        lastSuccessfulFetchAt: "2026-11-18T11:00:00.000Z",
+        lastUid: 12,
+        uidvalidity: 7,
+        recordCount: 42,
+        idle: { enabled: true, connected: true },
+        sanitizedBodyCache: { entries: 3, bytes: 2048 },
+        lastError: null,
+        ...overrides.serverStatus,
+      },
+      health: {
+        status: "ok",
+        staleAfterSeconds: 7200,
+        quietAfterDays: 7,
+        lastSuccessfulFetchAt: "2026-11-18T11:00:00.000Z",
+        lastSuccessfulFetchAgeSeconds: 3600,
+        idle: { enabled: true, connected: true },
+        lastError: null,
+        storage: {
+          journalExisted: true,
+          legacyJournalExisted: false,
+          uidMarkerExisted: true,
+          freshDataDirectory: false,
+        },
+        ...overrides.health,
+      },
+      cron: overrides.cron ?? "0 * * * *",
+    };
+  }
+
+  it("renders the status fields, age and links without a script", () => {
+    const html = renderStatusPage(makeModel());
+    expect(html).toContain('class="badge status-ok"');
+    expect(html).toContain("2026-11-18T11:00:00.000Z");
+    expect(html).toContain("1 hour ago");
+    expect(html).toContain("enabled, connected");
+    expect(html).toContain("<dd>42</dd>");
+    expect(html).toContain("UID 12 / UIDVALIDITY 7");
+    expect(html).toContain("3 entries, 2048 bytes");
+    expect(html).toContain("0 * * * *");
+    expect(html).toContain("stale after 2 hours");
+    expect(html).toContain("a feed with no email for 7 days is marked quiet");
+    expect(html).toContain('<a class="back" href="/rss/">');
+    expect(html).toContain('<a href="/manage">Manage feeds</a>');
+    expect(html).not.toContain("<script");
+    expect(html).toContain(":focus-visible");
+    expect(html).not.toContain('role="alert"');
+  });
+
+  it("shows never, none and disabled states", () => {
+    const html = renderStatusPage(
+      makeModel({
+        serverStatus: { lastSuccessfulFetchAt: null },
+        health: {
+          status: "starting",
+          lastSuccessfulFetchAt: null,
+          lastSuccessfulFetchAgeSeconds: null,
+          lastError: null,
+          idle: { enabled: false, connected: false },
+        },
+      }),
+    );
+    expect(html).toContain("never since startup");
+    expect(html).toContain("None reported.");
+    expect(html).toContain(">disabled<");
+    expect(html).toContain('class="badge status-starting"');
+  });
+
+  it("escapes the last error from the fetch", () => {
+    const html = renderStatusPage(
+      makeModel({
+        health: {
+          status: "degraded",
+          lastError: '<script>alert(1)</script> imap down',
+          idle: { enabled: true, connected: false },
+        },
+      }),
+    );
+    expect(html).toContain('class="badge status-degraded"');
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt; imap down");
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(html).toContain("enabled, reconnecting");
+  });
+
+  it("warns about an empty data directory", () => {
+    const html = renderStatusPage(
+      makeModel({
+        health: {
+          storage: {
+            journalExisted: false,
+            legacyJournalExisted: false,
+            uidMarkerExisted: false,
+            freshDataDirectory: true,
+          },
+        },
+      }),
+    );
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("The data directory was empty at startup");
+    expect(html).toContain("<code>/data</code>");
   });
 });

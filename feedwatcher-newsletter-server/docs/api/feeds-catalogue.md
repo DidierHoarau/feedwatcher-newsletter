@@ -8,16 +8,25 @@ OPML.
 ## Authentication
 
 `/api/feeds` is registered in the same access-control scope as `/rss/*`,
-`/`, `/view/*`, `/manage` and `/api/feeds/settings`. When `AUTH_PASSWORD` is
-non-empty, every request needs HTTP Basic credentials (`AUTH_USERNAME`, default
-`feedwatcher`) and returns `401` otherwise. `/api/status` stays unauthenticated
-for readiness probes.
+`/`, `/view/*`, `/status`, `/manage` and `/api/feeds/settings`. When
+`AUTH_PASSWORD` is non-empty, every request needs HTTP Basic credentials
+(`AUTH_USERNAME`, default `feedwatcher`) and returns `401` otherwise.
+`/api/status` stays unauthenticated for readiness probes.
 
 ## Example payload
 
 ```json
 {
   "version": 1,
+  "health": {
+    "status": "ok",
+    "staleAfterSeconds": 7200,
+    "quietAfterDays": 7,
+    "lastSuccessfulFetchAt": "2026-10-23T05:00:12.345Z",
+    "idle": { "enabled": true, "connected": true },
+    "lastError": null,
+    "storageFresh": false
+  },
   "feeds": [
     {
       "feedId": "morningbrew",
@@ -27,6 +36,8 @@ for readiness probes.
       "itemCount": 12,
       "servedItemCount": 12,
       "latestDate": "2026-10-16T08:00:00.000Z",
+      "lastEmailAt": "2026-10-16T08:00:00.000Z",
+      "quiet": true,
       "feedUrl": "https://feedwatcher-newsletter.example.com/rss/morningbrew.9f86d081884c7d65",
       "archiveUrl": "https://feedwatcher-newsletter.example.com/rss/morningbrew.9f86d081884c7d65/archive"
     },
@@ -38,6 +49,8 @@ for readiness probes.
       "itemCount": 3,
       "servedItemCount": 3,
       "latestDate": "2026-10-16T08:00:00.000Z",
+      "lastEmailAt": "2026-10-16T08:00:00.000Z",
+      "quiet": false,
       "feedUrl": "https://feedwatcher-newsletter.example.com/rss/thedaily.2b7d1e35f0c94a18",
       "archiveUrl": "https://feedwatcher-newsletter.example.com/rss/thedaily.2b7d1e35f0c94a18/archive"
     }
@@ -50,6 +63,7 @@ for readiness probes.
 | Field         | Type   | Description |
 | ------------- | ------ | ----------- |
 | `version`     | number | Catalogue contract version, currently `1`. |
+| `health`      | object | Ingestion health shared with `/status`; see below. |
 | `feeds`       | array  | Every offered feed, deterministically ordered. |
 | `feedId`      | string | Stable key derived from the sender (or `FEED_OVERRIDES`). Unchanged when a private token rotates. |
 | `title`       | string | Feed title: the `feed-settings.json` per-feed title when configured, otherwise the `FEED_OVERRIDES` title, otherwise the sender name. |
@@ -58,8 +72,26 @@ for readiness probes.
 | `itemCount`   | number | Number of retained emails in the feed; a merged source's items are counted in its target. |
 | `servedItemCount` | number | Number of emails the RSS feed actually serves: `min(itemCount, maxItems)`, where the per-feed `maxItems` overrides `FEED_MAX_ITEMS`; `itemCount` when the cap is `0`. |
 | `latestDate`  | string | Effective received date of the latest retained email, ISO‑8601: the sender `Date` header clamped to the local ingestion time, so it is never in the future. |
+| `lastEmailAt` | string \| null | The feed's last email date (`latestDate`, or `null` when the feed has no retained email). Equal to `latestDate`; exposed as the activity field the index displays. |
+| `quiet`       | boolean | `true` when `lastEmailAt` is `quietAfterDays` (7) days old or older. A quiet feed is still served and listed; the index only badges it. |
 | `feedUrl`     | string | Currently advertised feed URL (`/rss/<feedId>` or `/rss/<feedId>.<token>`). |
 | `archiveUrl`  | string | HTML archive of **all retained** emails of the feed: `feedUrl` + `/archive`. Exactly as protected as `feedUrl` (same capability token / Basic auth). |
+
+### `health`
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `status` | string | `starting` (no fetch completed and no error yet), `ok`, `degraded` (fetch error, or IMAP IDLE enabled but disconnected) or `stale` (last successful fetch older than `staleAfterSeconds`). |
+| `staleAfterSeconds` | number | Staleness threshold: twice the cron interval estimated from `EMAIL_FETCH_CRON`, with a 2-hour fallback for expressions that cannot be estimated. |
+| `quietAfterDays` | number | Quiet threshold in days (`7`), the value used for each feed's `quiet`. |
+| `lastSuccessfulFetchAt` | string \| null | ISO-8601 timestamp of the last successful fetch, or `null` before the first one (in-memory, reset on restart). |
+| `idle` | object | `{ enabled, connected }` for the IMAP IDLE connection, same values as `/api/status`. |
+| `lastError` | string \| null | Last fetch error reduced to one line and at most 500 characters, or `null`. |
+| `storageFresh` | boolean | `true` when `DATA_DIR` held no email journal, legacy store or resume marker at startup — usually a missing persistent volume (see [Persistence](../../../README.md#persistence)). |
+
+`health` carries no elapsed time or live age, so an unchanged ingestion produces
+a byte-identical `health` block and a stable `ETag`; the derived status is
+recomputed on each request from these values.
 
 Ignored senders (`SENDER_IGNORE_LIST`) and emails without a usable sender are
 never listed. Feeds hidden or merged away by `DATA_DIR/feed-settings.json`
@@ -75,7 +107,9 @@ version; removing or renaming a field, or changing its type, bumps it. A
 consumer should check `version` and ignore fields it does not know.
 
 `servedItemCount` and `archiveUrl` are additive fields: they were introduced
-without changing the version from `1`.
+without changing the version from `1`. The top-level `health` object and the
+per-feed `lastEmailAt` and `quiet` fields are additive in the same way: a
+version-1 consumer that ignores unknown fields keeps working unchanged.
 
 ## Ordering
 
@@ -88,16 +122,24 @@ produces a byte-identical body.
 The response carries a strong `ETag` (a hash of the body), `Last-Modified` and
 `Cache-Control: private, no-cache`, and answers `If-None-Match` /
 `If-Modified-Since` with `304 Not Modified`. Validators change on append,
-purge and feed-identity (configuration) changes, so pollers revalidate instead
-of re-downloading unchanged catalogues. Responses are compressed with
-gzip/brotli when the client advertises support and the body exceeds 1 KiB.
+purge, feed-identity (configuration) changes and fetch success or failure, so
+pollers revalidate instead of re-downloading unchanged catalogues. The health
+block contains no elapsed time or current age, so an unchanged ingestion keeps
+a stable `ETag`. Responses are compressed with gzip/brotli when the client
+advertises support and the body exceeds 1 KiB.
 
 ## Relation to the other representations
 
 - `GET /rss/` with `Accept: text/html` is the human index page; it advertises
   one `<link rel="alternate" type="application/rss+xml">` per feed for reader
   autodiscovery and is served with `Referrer-Policy: no-referrer`, so tokens
-  cannot leak through referrers.
+  cannot leak through referrers. It sorts feeds by recent activity, shows each
+  feed's last email date and quiet badge, previews the newest two issues,
+  accepts a server-side `?q=` filter and works without JavaScript.
+- `GET /status` is the human ingestion health page. It shows the same derived
+  status and the same values embedded in `health` (last successful fetch, last
+  error, IDLE, storage, cron threshold) plus a warning when `DATA_DIR` was
+  empty at startup; it is protected by Basic auth like the catalogue.
 - `GET /rss/` without `Accept: text/html` is the legacy JSON array. It keeps
   its `id`, `senderName`, `senderEmail` and `feedUrl` keys and additionally
   exposes `feedId`, `title`, `itemCount` and `latestDate`. New consumers

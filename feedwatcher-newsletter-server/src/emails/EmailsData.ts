@@ -43,6 +43,13 @@ let retentionDays = 3;
 let journalFilePath = "";
 let legacyFilePath = "";
 
+// Storage shape observed at init, before legacy migration creates files: an
+// empty data directory after startup is the symptom of a missing/unmounted
+// persistent volume and is surfaced as a health signal.
+let storageJournalExisted = false;
+let storageLegacyJournalExisted = false;
+let storageUidMarkerExisted = false;
+
 // In-memory view of the journal, the single source of truth on disk. Built
 // once from one pass at init, then updated write-through on every durable
 // append and purge, so reads never touch the filesystem. The journal may hold
@@ -212,6 +219,13 @@ export function EmailsDataInit(
   EmailsDataSetRetentionDays(configuredRetentionDays);
   journalFilePath = path.join(dataDir, "emails.jsonl");
   legacyFilePath = path.join(dataDir, "emails.json");
+  // Capture the on-disk state before the migration or the index write can
+  // create files, so "fresh" really means "nothing was persisted before".
+  storageJournalExisted = fse.existsSync(journalFilePath);
+  storageLegacyJournalExisted = fse.existsSync(legacyFilePath);
+  storageUidMarkerExisted =
+    fse.existsSync(path.join(dataDir, "last-uid.json")) ||
+    fse.existsSync(path.join(dataDir, "last-uid.txt"));
   migrateLegacyStore();
   recordsByMessageId = new Map();
   itemById = new Map();
@@ -740,4 +754,27 @@ export function EmailItemsGetExistingIds(): Set<string> {
 // Number of indexed emails (one per unique message id), for the status probe.
 export function EmailsDataGetRecordCount(): number {
   return recordsByMessageId.size;
+}
+
+export interface EmailsDataStorageState {
+  journalExisted: boolean;
+  legacyJournalExisted: boolean;
+  uidMarkerExisted: boolean;
+  freshDataDirectory: boolean;
+}
+
+// A data directory without journal, legacy store or UID marker was empty at
+// startup: either a first deployment or a lost volume mount, which the status
+// page surfaces instead of leaving the owner to infer it from the logs.
+export function EmailsDataGetStorageState(): EmailsDataStorageState {
+  return {
+    journalExisted: storageJournalExisted,
+    legacyJournalExisted: storageLegacyJournalExisted,
+    uidMarkerExisted: storageUidMarkerExisted,
+    freshDataDirectory: !(
+      storageJournalExisted ||
+      storageLegacyJournalExisted ||
+      storageUidMarkerExisted
+    ),
+  };
 }

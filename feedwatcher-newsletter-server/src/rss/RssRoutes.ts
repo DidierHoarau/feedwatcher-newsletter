@@ -27,12 +27,23 @@ import {
   FeedSettingsResolveMergeTarget,
 } from "../feeds/FeedSettings";
 import {
+  FeedListingFilter,
   FeedListingGetBaseUrl,
   FeedListingGetFeeds,
+  FeedListingGetPreview,
+  FeedListingNormalizeQuery,
   FeedListingServedItemCount,
+  FeedListingSortByRecent,
 } from "../feeds/FeedListing";
 import { OpmlGeneratorBuild } from "../feeds/OpmlGenerator";
 import { RssFeedGeneratorBuildFeedById } from "../emails/RssFeedGenerator";
+import { ServerStatusGetFetchState } from "../ServerStatus";
+import { FeedActivityIsQuiet } from "../status/FeedActivity";
+import {
+  HealthBannerMessage,
+  HealthGet,
+  HealthNeedsBanner,
+} from "../status/Health";
 import { HttpConditionalSend } from "./HttpConditional";
 import { renderFeedArchivePage, renderFeedsIndexPage } from "./HtmlPages";
 
@@ -51,9 +62,20 @@ export class RssRoutes {
         const accept = request.headers.accept || "";
         const lastModifiedMs = EmailsDataGetLastModified();
         if (accept.includes("text/html")) {
+          const nowMs = Date.now();
+          const query = FeedListingNormalizeQuery(
+            (request.query as { q?: unknown } | undefined)?.q,
+          );
+          const visible = FeedListingSortByRecent(
+            FeedListingFilter(feeds, query),
+          );
+          const health = HealthGet(this.config, nowMs);
+          const banner = HealthNeedsBanner(health)
+            ? HealthBannerMessage(health)
+            : undefined;
           return HttpConditionalSend(request, reply, {
             body: renderFeedsIndexPage(
-              feeds.map((f) => ({
+              visible.map((f) => ({
                 feedUrl: f.feedUrl,
                 archiveUrl: f.archiveUrl,
                 title: f.title,
@@ -62,10 +84,18 @@ export class RssRoutes {
                 itemCount: f.itemCount,
                 servedItemCount: f.servedItemCount,
                 latestDate: f.latestDate,
+                quiet: FeedActivityIsQuiet(f.latestDate, nowMs),
+                preview: FeedListingGetPreview(f.feedId, this.config),
               })),
+              { query, totalCount: feeds.length, banner },
             ),
             contentType: "text/html; charset=utf-8",
-            lastModifiedMs,
+            // The banner depends on the fetch state even when no email was
+            // stored, so the health change participates in the validators.
+            lastModifiedMs: Math.max(
+              lastModifiedMs,
+              ServerStatusGetFetchState().lastChangeAtMs,
+            ),
             extraHeaders: { Vary: "Accept" },
           });
         }

@@ -12,6 +12,7 @@ import { SanitizedBodyCacheGet } from "./emails/SanitizedBodyCache";
 import { FeedIdentityInit } from "./feeds/FeedIdentity";
 import {
   ServerStatusGet,
+  ServerStatusGetFetchState,
   ServerStatusRecordFetchError,
   ServerStatusRecordFetchSuccess,
 } from "./ServerStatus";
@@ -135,5 +136,38 @@ describe("fetch health recording", () => {
   it("records a single-line fallback for a non-Error value", () => {
     ServerStatusRecordFetchError("  socket\nreset  ");
     expect(ServerStatusGet().lastError).toBe("socket reset");
+  });
+});
+
+describe("fetch state", () => {
+  it("exposes the in-memory fetch state without reading the UID marker", () => {
+    const atMs = Date.parse("2026-11-18T12:00:00.000Z");
+    ServerStatusRecordFetchSuccess(atMs);
+    const state = ServerStatusGetFetchState();
+    expect(state.lastSuccessfulFetchAt).toBe(
+      new Date(atMs).toISOString(),
+    );
+    expect(state.lastError).toBeNull();
+    expect(state.lastChangeAtMs).toBe(atMs);
+
+    const errorAtMs = atMs + 5000;
+    ServerStatusRecordFetchError(new Error("imap down"), errorAtMs);
+    const failed = ServerStatusGetFetchState();
+    expect(failed.lastError).toBe("imap down");
+    expect(failed.lastSuccessfulFetchAt).toBe(new Date(atMs).toISOString());
+    expect(failed.lastChangeAtMs).toBe(errorAtMs);
+  });
+
+  it("clears the error and moves lastChangeAtMs on a later success", () => {
+    const errorAtMs = Date.parse("2026-11-18T12:00:00.000Z");
+    ServerStatusRecordFetchError("boom", errorAtMs);
+    const successAtMs = errorAtMs + 60 * 1000;
+    ServerStatusRecordFetchSuccess(successAtMs);
+    const state = ServerStatusGetFetchState();
+    expect(state.lastError).toBeNull();
+    expect(state.lastChangeAtMs).toBe(successAtMs);
+    expect(state.lastSuccessfulFetchAt).toBe(
+      new Date(successAtMs).toISOString(),
+    );
   });
 });

@@ -4,11 +4,11 @@ FeedWatcher Newsletter is a server-only service that connects to an IMAP mailbox
 
 # Philosophy
 
-This project is a server-only companion to FeedWatcher. It has no UI and requires no external database. Emails are stored on disk as an append-only JSON-lines journal (`emails.jsonl`, migrated automatically from the legacy `emails.json` array) and automatically purged after a configurable retention period. The goal is a lightweight, self-contained service that converts an email inbox into subscribable RSS feeds.
+This project is a server-only companion to FeedWatcher. It has no client-side framework or build step: the human-facing pages (feed index, archives, email view, `/manage`, `/status`) are small server-rendered HTML documents that work without JavaScript. Emails are stored on disk as an append-only JSON-lines journal (`emails.jsonl`, migrated automatically from the legacy `emails.json` array) and automatically purged after a configurable retention period. The goal is a lightweight, self-contained service that converts an email inbox into subscribable RSS feeds.
 
 One RSS feed is generated per unique sender name. Each feed's items are the email bodies (HTML preferred, plain text fallback) from that sender, ordered by date received.
 
-Email bodies are sanitized when served (scripts, event handlers, dangerous URLs and tracking pixels are stripped while the sender's presentation — table layout, safe inline styles, typography and colors — is kept), each item links to a readable web view of the email, and feeds advertise near-real-time ingestion via IMAP IDLE with the cron schedule as fallback. Each feed serves a bounded recent window (newest `FEED_MAX_ITEMS` emails, default 200) and every feed has a per-feed archive covering the full retention window. Feed URLs can carry a per-feed token, senders can be ignored or renamed via configuration, and all feeds are discoverable through the versioned JSON catalogue (`/api/feeds`), advertised for reader autodiscovery on the index page, and importable anywhere through OPML export. Tokenized URLs only obfuscate feed addresses; the service has no authentication by default — see [Security and privacy](#security-and-privacy).
+Email bodies are sanitized when served (scripts, event handlers, dangerous URLs and tracking pixels are stripped while the sender's presentation — table layout, safe inline styles, typography and colors — is kept), each item links to a readable web view of the email, and feeds advertise near-real-time ingestion via IMAP IDLE with the cron schedule as fallback. Each feed serves a bounded recent window (newest `FEED_MAX_ITEMS` emails, default 200) and every feed has a per-feed archive covering the full retention window. Feed URLs can carry a per-feed token, senders can be ignored or renamed via configuration, and all feeds are discoverable through the versioned JSON catalogue (`/api/feeds`), advertised for reader autodiscovery on the index page, and importable anywhere through OPML export. Ingestion health is visible in the human UI: `/status` shows fetch, IDLE and storage state, the index shows each feed's last email and quiet badges, and a stale or degraded ingestion adds a banner with a link to `/status`. Tokenized URLs only obfuscate feed addresses; the service has no authentication by default — see [Security and privacy](#security-and-privacy).
 
 # Deployment
 
@@ -160,7 +160,7 @@ The 1Gi memory limit reflects the in-memory index: a ~96 MB journal indexes to r
 
 # Security and privacy
 
-By default the service has **no authentication**: anyone who can reach the host can list the feeds (`/api/feeds` catalogue, `/rss/` HTML index and JSON list), fetch any feed, read any feed's archive (`/rss/<id>/archive`), open any email at `/view/:emailId`, and read or rewrite the curation settings at `/manage` and `/api/feeds/settings`. The archive is exactly as protected as its feed: it lives under `/rss/` with the same capability-token and strict-mode rules, is covered by the same HTTP Basic scope, and the per-feed `archiveUrl` is derived from the tokenized `feedUrl`. `FEED_PRIVATE_URLS` only obfuscates feed URLs (`<feedId>.<token>`): the index, the catalogue and the OPML export publish those URLs to every caller, and bare feed ids keep working unless strict private mode is enabled. Treat tokenized URLs as a convenience, not as access control. `SENDER_IGNORE_LIST` is enforced on every read path, so ignored senders are never listed and their feeds and permalinks are never served.
+By default the service has **no authentication**: anyone who can reach the host can list the feeds (`/api/feeds` catalogue, `/rss/` HTML index and JSON list), fetch any feed, read any feed's archive (`/rss/<id>/archive`), open any email at `/view/:emailId`, read the ingestion health at `/status`, and read or rewrite the curation settings at `/manage` and `/api/feeds/settings`. The archive is exactly as protected as its feed: it lives under `/rss/` with the same capability-token and strict-mode rules, is covered by the same HTTP Basic scope, and the per-feed `archiveUrl` is derived from the tokenized `feedUrl`. `FEED_PRIVATE_URLS` only obfuscates feed URLs (`<feedId>.<token>`): the index, the catalogue and the OPML export publish those URLs to every caller, and bare feed ids keep working unless strict private mode is enabled. Treat tokenized URLs as a convenience, not as access control. `SENDER_IGNORE_LIST` is enforced on every read path, so ignored senders are never listed and their feeds and permalinks are never served.
 
 IMAP connections verify the server certificate by default (see [IMAP](#imap)). HTML pages are served with a Content-Security-Policy (hash-based for the inline copy script, so ETag/304 caching still works) and every response carries `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and a restrictive `Permissions-Policy`. RSS, JSON, catalogue and OPML payloads get the same baseline headers without the CSP; the global `no-referrer` policy prevents feed tokens from leaking through referrers when readers follow the autodiscovery links.
 
@@ -194,7 +194,7 @@ There is no "trusted" pass-through and sanitization cannot be disabled. Only the
 
 ## HTTP Basic authentication (optional)
 
-Set `AUTH_PASSWORD` (and optionally `AUTH_USERNAME`, default `feedwatcher`) to require HTTP Basic credentials on `/`, `/rss/*`, `/view/*`, `/manage` and `/api/feeds` (including `PUT /api/feeds/settings`). `/api/status` stays open for readiness probes. Authentication is disabled while `AUTH_PASSWORD` is empty, so an unchanged deployment keeps serving existing subscribers. Configure every feed reader (and browser) with the same credentials, and only send them over HTTPS. The password is registered as sensitive and masked in configuration logs; `AUTH_USERNAME` and `AUTH_PASSWORD` are applied on hot configuration reload.
+Set `AUTH_PASSWORD` (and optionally `AUTH_USERNAME`, default `feedwatcher`) to require HTTP Basic credentials on `/`, `/rss/*`, `/view/*`, `/status`, `/manage` and `/api/feeds` (including `PUT /api/feeds/settings`). `/api/status` stays open for readiness probes. Authentication is disabled while `AUTH_PASSWORD` is empty, so an unchanged deployment keeps serving existing subscribers. Configure every feed reader (and browser) with the same credentials, and only send them over HTTPS. The password is registered as sensitive and masked in configuration logs; `AUTH_USERNAME` and `AUTH_PASSWORD` are applied on hot configuration reload.
 
 ## Strict private mode (optional)
 
@@ -332,6 +332,7 @@ Curation is stored separately from the email journal, so hiding, renaming or mer
 
 - **In-memory index.** `emails.jsonl` remains the single source of truth, but it is parsed once at startup into an in-memory index (current record per message id, item id → record, journal record counts). Appends and purges update the index write-through and feed grouping is derived lazily in memory, so `/rss/`, `/rss/opml` and `/rss/:id` never read the journal during a request. An unreadable journal fails the startup instead of silently serving empty feeds. Memory follows the journal size: a ~96 MB journal indexes to roughly 340 MB RSS after startup (the documented 1 GiB container limit leaves headroom).
 - **Bounded feed window.** `/rss/:id` serializes at most `FEED_MAX_ITEMS` emails (default 200), so the response payload and build cost scale with the served window, not with the retained history — a sender holding 1,021 retained emails no longer produces a multi-MB feed. The `ETag` hashes the served (capped) document, so conditional requests stay correct at the cap boundary.
+- **Bounded index previews.** The HTML index renders at most two recent issues per feed (subject, date, summary) from the shared sanitized-body cache instead of embedding every retained email. Filtering (`?q=`) and recent-activity sorting run server-side, so the index stays a plain HTML document with no JavaScript framework and no client-side data fetching.
 - **Sanitized-body cache.** Sanitized HTML and its plain-text summary are cached per item id and sanitizer configuration (both `EMAIL_STRIP_TRACKING_PIXELS` and `EMAIL_BLOCK_REMOTE_IMAGES`) in a bounded LRU of 32 MiB (accounted as raw UTF-16 size, evicted on purge and reset at startup). Feed builds and `/view/:emailId` share the cache, so a body is sanitized once per configuration instead of on every poll.
 - **Conditional requests.** `/rss/` (JSON and HTML), `/rss/opml`, `/rss/:id` and `/api/feeds` return a strong `ETag` (content hash) and `Last-Modified`, both invalidated by append, purge and feed-identity changes, and answer `If-None-Match`/`If-Modified-Since` with `304 Not Modified`. `/rss/` also sends `Vary: Accept`.
 - **Compression.** gzip, brotli and deflate are negotiated for `/rss/*` and the HTML pages; responses below 1 KiB stay identity-encoded, and a request without `Accept-Encoding` gets the identity representation (`Vary: Accept-Encoding`).
@@ -355,7 +356,7 @@ Curation is stored separately from the email journal, so hiding, renaming or mer
 | `OPENTELEMETRY_COLLECTOR_AWS`                             | Enable AWS OTel collector                   | `false` |
 | `OPENTELEMETRY_COLLECT_AUTHORIZATION_HEADER`              | Authorization header for the OTel collector |         |
 
-Tracing covers the product routes: `/`, `/rss/*`, `/view/*`, `/manage` and `/api/feeds*` produce an HTTP server span (`GET-<route>`), and each feed build runs inside it as a `RssFeedGeneratorBuildFeedById` child span. Requests that match no route are named by their method (`GET`) to keep span-name cardinality bounded. `/api/status` is excluded from tracing because the readiness probe pollutes the trace list with it. The service emits **no metrics**: the Fastify hooks are registered without a meter. The span's `url.path` is the matched route template (for example `/rss/:id`); for unmatched paths, every dotted (token-like) segment is replaced with `:redacted`, so capability tokens never reach the trace backend.
+Tracing covers the product routes: `/`, `/rss/*`, `/view/*`, `/manage`, `/status` and `/api/feeds*` produce an HTTP server span (`GET-<route>`), and each feed build runs inside it as a `RssFeedGeneratorBuildFeedById` child span. Requests that match no route are named by their method (`GET`) to keep span-name cardinality bounded. `/api/status` is excluded from tracing because the readiness probe pollutes the trace list with it. The service emits **no metrics**: the Fastify hooks are registered without a meter. The span's `url.path` is the matched route template (for example `/rss/:id`); for unmatched paths, every dotted (token-like) segment is replaced with `:redacted`, so capability tokens never reach the trace backend.
 
 `service.version` is read from `feedwatcher-newsletter-server/package.json` (the runtime image ships that manifest), so traces, logs and metrics identify the application version rather than the installed shared library version. An explicit `VERSION` environment variable or config file value still overrides it.
 
@@ -366,7 +367,8 @@ When authentication is enabled (`AUTH_PASSWORD` non-empty), every endpoint below
 | Method | Path              | Description                                              |
 | ------ | ----------------- | -------------------------------------------------------- |
 | `GET`  | `/api/feeds`      | Versioned JSON feed catalogue — the stable contract for readers (see [Feed catalogue](#feed-catalogue-apifeeds)); protected when authentication is enabled |
-| `GET`  | `/rss/`           | List all available RSS feeds — HTML index page (with reader autodiscovery links) for browsers, JSON array for API clients |
+| `GET`  | `/rss/`           | List all available RSS feeds — HTML index page (with reader autodiscovery links, `?q=` filter, last-email dates, quiet badges and two-issue previews) for browsers, JSON array for API clients |
+| `GET`  | `/status`         | Human-readable ingestion health page (fetch, IDLE, storage, cron); protected by Basic auth when enabled |
 | `GET`  | `/rss/opml`       | OPML 2.0 export of all feeds, grouped under a `Newsletters` folder (importable into FeedWatcher and most RSS readers) |
 | `GET`  | `/rss/:id`        | Get the RSS feed for a specific sender by sender ID; serves the newest `FEED_MAX_ITEMS` emails; `404` for unknown feeds, invalid tokens and ignored senders |
 | `GET`  | `/rss/:id/archive` | HTML archive of **all retained** emails of one feed (subject, date, sender, summary), newest first; same auth and token rules as its feed |
@@ -400,7 +402,7 @@ The `/rss/` JSON list keeps its legacy shape and additionally exposes the catalo
 ]
 ```
 
-The HTML index also advertises one `<link rel="alternate" type="application/rss+xml">` per feed, so a generic reader pointed at the root discovers every feed without parsing the page; the global `Referrer-Policy: no-referrer` keeps the tokenized URLs from leaking through referrers.
+The HTML index also advertises one `<link rel="alternate" type="application/rss+xml">` per feed, so a generic reader pointed at the root discovers every feed without parsing the page; the global `Referrer-Policy: no-referrer` keeps the tokenized URLs from leaking through referrers. The page sorts feeds by recent activity, shows each feed's last email date, badges feeds quiet for 7+ days, lists the newest two issues per feed as a preview (the archive keeps the full list), and accepts a server-side `?q=` filter over feed title, sender name, sender email and feed id. It is a plain HTML form and works without JavaScript.
 
 ## Feed catalogue (`/api/feeds`)
 
@@ -409,6 +411,15 @@ The HTML index also advertises one `<link rel="alternate" type="application/rss+
 ```json
 {
   "version": 1,
+  "health": {
+    "status": "ok",
+    "staleAfterSeconds": 7200,
+    "quietAfterDays": 7,
+    "lastSuccessfulFetchAt": "2026-10-23T05:00:12.345Z",
+    "idle": { "enabled": true, "connected": true },
+    "lastError": null,
+    "storageFresh": false
+  },
   "feeds": [
     {
       "feedId": "thedailynewsletter",
@@ -418,6 +429,8 @@ The HTML index also advertises one `<link rel="alternate" type="application/rss+
       "itemCount": 12,
       "servedItemCount": 12,
       "latestDate": "2026-10-16T08:00:00.000Z",
+      "lastEmailAt": "2026-10-16T08:00:00.000Z",
+      "quiet": false,
       "feedUrl": "https://feedwatcher-newsletter.example.com/rss/thedailynewsletter.9f86d081884c7d65",
       "archiveUrl": "https://feedwatcher-newsletter.example.com/rss/thedailynewsletter.9f86d081884c7d65/archive"
     }
@@ -428,18 +441,21 @@ The HTML index also advertises one `<link rel="alternate" type="application/rss+
 | Field         | Description |
 | ------------- | ----------- |
 | `version`     | Contract version, currently `1`. Additive fields keep the version; removals, renames and type changes bump it. |
+| `health`      | Ingestion health snapshot shared with `/status`: `status` (`starting`, `ok`, `degraded` or `stale`), the staleness threshold (`staleAfterSeconds`, twice the estimated `EMAIL_FETCH_CRON` interval, with a 2-hour fallback), `quietAfterDays` (7), the last successful fetch (or `null`), the IMAP IDLE state, the last fetch error (or `null`) and `storageFresh` (`true` when `DATA_DIR` held no email journal, legacy store or resume marker at startup — likely a missing persistent volume). |
 | `feedId`      | Stable key derived from the sender (or `FEED_OVERRIDES`); it does not change when a private token rotates. |
 | `title`       | Feed title: `feed-settings.json` per-feed title, then `FEED_OVERRIDES`, then the sender name. |
 | `senderName` / `senderEmail` | Sender of the feed's latest retained email (for a merged feed, the latest item across its sources). |
 | `itemCount`   | Number of retained emails in the feed; a merged source's items are counted in its target. |
 | `servedItemCount` | Number of emails the RSS feed actually serves: `min(itemCount, effective maxItems)`, where the per-feed `maxItems` overrides `FEED_MAX_ITEMS`; `itemCount` when the cap is `0`. |
 | `latestDate`  | Effective received date of the latest retained email, ISO-8601: the `Date` header clamped to the local ingestion time, so it is never in the future. |
+| `lastEmailAt` | The feed's last email date (`latestDate`, `null` when the feed has no retained email). It is the value the index compares to decide `quiet`. |
+| `quiet`       | `true` when the latest retained email is 7 days old or older (`quietAfterDays`); a quiet feed is still served and listed, the index just badges it. |
 | `feedUrl`     | Currently advertised feed URL (`/rss/<feedId>` or `/rss/<feedId>.<token>`). |
 | `archiveUrl`  | HTML archive listing every retained email of the feed (`feedUrl` + `/archive`); same capability token and Basic auth as `feedUrl`. |
 
 - **Ordering** is deterministic: `(title, feedId)`.
 - **Auth scope** matches `/rss/*`: with `AUTH_PASSWORD` set the endpoint returns `401` without Basic credentials.
-- **Conditional requests** are supported (`ETag`, `Last-Modified`, `304`, `Cache-Control: private, no-cache`).
+- **Conditional requests** are supported (`ETag`, `Last-Modified`, `304`, `Cache-Control: private, no-cache`). Appends, purges, feed-identity changes and fetch success/failure invalidate the validators; `health` carries no elapsed time, so an unchanged ingestion does not produce a new `ETag` on every poll.
 - **Consumers should key on `feedId`**, not on `feedUrl`: private URLs are capability URLs that may rotate, and `FEED_PRIVATE_URLS_STRICT=true` rejects bare ids. Refresh `feedUrl` from the catalogue instead of persisting it as the identity. Set `PUBLIC_URL` so catalogue URLs do not depend on the request `Host`.
 - **Feed window vs archive**: `/rss/:id` serves the newest `servedItemCount` emails, while `itemCount` and `archiveUrl` cover every retained email. A consumer can show "`servedItemCount` of `itemCount` available" and link to the archive for older items.
 - **Hidden and merged feeds** (see [Feed settings file](#feed-settings-file-data_dirfeed-settingsjson)): hidden feeds are absent from every representation and return `404`; a merged source is absent and its items appear in the target. The catalogue contract version stays `1`.
@@ -447,6 +463,22 @@ The HTML index also advertises one `<link rel="alternate" type="application/rss+
 The full contract (fields, versioning rule, overrides, private-URL modes, hidden/merge filtering) is documented in [`feedwatcher-newsletter-server/docs/api/feeds-catalogue.md`](feedwatcher-newsletter-server/docs/api/feeds-catalogue.md).
 
 ## Status
+
+Ingestion health is exposed twice: `/status` is the human-readable page (same auth scope as the feed pages), and `/api/status` is the unauthenticated JSON snapshot used by probes and monitoring. Both are derived from the same in-memory state.
+
+### Human status page (`/status`)
+
+`GET /status` renders a server-rendered HTML page (no JavaScript, `Cache-Control: no-store`) with the overall ingestion status and the details behind it:
+
+- **Status badge**: `starting` (no fetch completed yet and no error), `ok`, `degraded` (fetch error, or IMAP IDLE enabled but disconnected), or `stale` (the last successful fetch is older than twice the estimated cron interval).
+- **Last successful fetch** with its UTC timestamp and age, or "never"; **last error** (one line, truncated) or "None reported.".
+- **IMAP IDLE**: disabled, enabled and connected, or enabled and reconnecting.
+- **Storage**: retained records, UID and UIDVALIDITY, sanitized-body cache entries/bytes, `EMAIL_FETCH_CRON` with the computed staleness threshold, and the 7-day quiet threshold.
+- A warning when `DATA_DIR` was empty at startup, which usually means the persistent volume is missing and the next restart will re-ingest the mailbox and rotate private feed tokens (see [Persistence](#persistence)).
+
+The index page shows a banner linking to `/status` whenever the health is stale or degraded, so a broken ingestion is visible before a reader notices missing issues. Health statuses are also embedded in the `/api/feeds` catalogue (see [Feed catalogue](#feed-catalogue-apifeeds)).
+
+### Readiness snapshot (`/api/status`)
 
 `GET /api/status` is unauthenticated (the Kubernetes readiness probe calls it every 10 s) and returns an in-memory snapshot of the ingestion health without any credentials or email content:
 
@@ -468,5 +500,6 @@ The full contract (fields, versioning rule, overrides, private-URL modes, hidden
 - `recordCount` is the number of indexed emails (one per unique message id).
 - `idle.enabled` stays `true` while IMAP IDLE is running; `idle.connected` turns `false` while it is waiting to reconnect — a stall detector can compare both.
 - `sanitizedBodyCache` reports the number of entries and the accounted size (UTF-16 code units) of the bounded 32 MiB sanitized-body LRU, so its memory use is observable.
+- The derived `starting`/`ok`/`degraded`/`stale` status shown on `/status` and in the catalogue comes from these fields: a fetch counts as stale when it is older than twice the interval estimated from `EMAIL_FETCH_CRON` (2 hours when the expression cannot be estimated), and ingestion is degraded when the last fetch failed or IMAP IDLE is enabled but disconnected.
 
 `/api/status` only becomes reachable after `DATA_DIR` has been read and indexed, because the server loads the journal before it starts listening, so a successful probe never observes a half-built index. `lastSuccessfulFetchAt` stays `null` until the first fetch completes, which distinguishes "index ready, first fetch pending" from a completed first ingestion.
