@@ -1,4 +1,8 @@
 import { EmailItem } from "../emails/EmailFetcher";
+import type { FeedPreviewItem } from "../feeds/FeedListing";
+import type { ServerStatus } from "../ServerStatus";
+import type { IngestionHealth } from "../status/Health";
+import { HealthFormatDuration } from "../status/HealthFormat";
 
 export interface ViewPageNavigation {
   feed?: { url: string; title: string };
@@ -15,6 +19,8 @@ interface FeedForIndex {
   itemCount: number;
   servedItemCount: number;
   latestDate: string;
+  quiet?: boolean;
+  preview?: FeedPreviewItem[];
 }
 
 function escapeHtml(value: string): string {
@@ -191,6 +197,87 @@ const SHARED_CSS = `
   .notice { background: #e8f5e9; border: 1px solid #a5d6a7; }
   .error { background: #fdecea; border: 1px solid #f5b5ae; }
   .manage-note { color: var(--text-muted); font-size: 0.85rem; margin: 0 0 1rem; }
+  .banner {
+    background: #fff4e5;
+    border: 1px solid #f0b37e;
+    border-radius: var(--radius);
+    padding: 0.75rem 1rem;
+    margin: 0 0 1rem;
+  }
+  .banner a { font-weight: 600; }
+  .badge {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 0.05rem 0.5rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+  .badge.quiet { background: #fff4e5; border: 1px solid #f0b37e; color: #8a4b08; }
+  .badge.status-ok { background: #e8f5e9; border: 1px solid #a5d6a7; color: #1b5e20; }
+  .badge.status-starting { background: #eef2f7; border: 1px solid #c3ccd8; color: #334155; }
+  .badge.status-degraded { background: #fdecea; border: 1px solid #f5b5ae; color: #8a1c12; }
+  .badge.status-stale { background: #fff4e5; border: 1px solid #f0b37e; color: #8a4b08; }
+  .filter-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    margin: 0 0 1rem;
+  }
+  .filter-form input[type="search"] {
+    flex: 1 1 12rem;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+  }
+  .preview { grid-column: 1 / -1; margin: 0.35rem 0 0; }
+  .preview-title {
+    margin: 0 0 0.25rem;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+  }
+  .preview-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.4rem; }
+  .preview-list li { border-left: 2px solid var(--border); padding-left: 0.6rem; }
+  .preview-list .summary { margin: 0.15rem 0 0; font-size: 0.9rem; }
+  .preview-list .when { color: var(--text-muted); font-size: 0.8rem; margin-left: 0.4rem; }
+  .empty {
+    background: var(--surface);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 1rem 1.25rem;
+  }
+  .status-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.5rem 1.5rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem 1.25rem;
+    margin: 0 0 1rem;
+  }
+  @media (min-width: 640px) {
+    .status-grid { grid-template-columns: max-content 1fr; }
+  }
+  .status-grid dt { color: var(--text-muted); font-size: 0.85rem; }
+  .status-grid dd { margin: 0; overflow-wrap: anywhere; }
+  .warning {
+    background: #fdecea;
+    border: 1px solid #f5b5ae;
+    border-radius: var(--radius);
+    padding: 0.75rem 1rem;
+    margin: 0 0 1rem;
+  }
+  a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible {
+    outline: 3px solid var(--accent);
+    outline-offset: 2px;
+  }
 `;
 
 // Inline copy-to-clipboard script. Its exact text is hashed for the CSP, so
@@ -207,7 +294,43 @@ export const COPY_SCRIPT = `
   });
 `;
 
-export function renderFeedsIndexPage(feeds: FeedForIndex[]): string {
+export interface FeedsIndexOptions {
+  query?: string;
+  totalCount?: number;
+  banner?: string;
+}
+
+function renderFeedPreview(preview: FeedPreviewItem[]): string {
+  if (preview.length === 0) {
+    return "";
+  }
+  const items = preview
+    .map(
+      (item) => `
+          <li>
+            <a href="/view/${encodeURIComponent(item.id)}">${escapeHtml(
+              item.subject,
+            )}</a><span class="when">${escapeHtml(
+              new Date(item.date).toUTCString(),
+            )}</span>
+            <p class="summary">${escapeHtml(item.summary)}</p>
+          </li>`,
+    )
+    .join("");
+  return `
+      <div class="preview">
+        <p class="preview-title">Latest issues</p>
+        <ul class="preview-list">${items}
+        </ul>
+      </div>`;
+}
+
+export function renderFeedsIndexPage(
+  feeds: FeedForIndex[],
+  options: FeedsIndexOptions = {},
+): string {
+  const query = options.query || "";
+  const totalCount = options.totalCount ?? feeds.length;
   // Reader autodiscovery: one alternate link per feed. Attribute values are
   // escaped because titles come from sender names and override configuration.
   const discoveryLinks = feeds
@@ -226,17 +349,38 @@ export function renderFeedsIndexPage(feeds: FeedForIndex[]): string {
         feed.servedItemCount < feed.itemCount
           ? `${feed.servedItemCount} of ${feed.itemCount} email(s) in the feed`
           : `${feed.itemCount} email(s)`;
+      const quietBadge = feed.quiet
+        ? ` <span class="badge quiet" title="No new email for 7 days or more">Quiet 7+ days</span>`
+        : "";
       return `
     <li class="feed-card">
-      <h2>${escapeHtml(feed.title)}</h2>
-      <span class="meta">${escapeHtml(feed.senderEmail)} · ${countText} · <a class="archive" href="${escapeHtml(feed.archiveUrl)}">Archive</a></span>
+      <h2>${escapeHtml(feed.title)}${quietBadge}</h2>
+      <span class="meta">${escapeHtml(feed.senderEmail)} · ${countText} · Last email ${escapeHtml(
+        new Date(feed.latestDate).toUTCString(),
+      )} · <a class="archive" href="${escapeHtml(
+        feed.archiveUrl,
+      )}">All ${feed.itemCount} retained email(s)</a></span>
       <div class="feed-url">
         <code>${escapeHtml(feed.feedUrl)}</code>
         <button type="button" class="copy" data-url="${escapeHtml(feed.feedUrl)}">Copy</button>
-      </div>
+      </div>${renderFeedPreview(feed.preview || [])}
     </li>`;
     })
     .join("\n");
+  const banner = options.banner
+    ? `  <p class="banner" role="status">${escapeHtml(
+        options.banner,
+      )} <a href="/status">Ingestion status</a></p>\n`
+    : "";
+  const subtitle = query
+    ? `Showing ${feeds.length} of ${totalCount} feed(s) matching “${escapeHtml(
+        query,
+      )}”.`
+    : `${feeds.length} newsletter feed(s) available. Copy a feed URL into any RSS reader.`;
+  const emptyState =
+    feeds.length === 0 && query
+      ? `  <p class="empty">No feed matches “${escapeHtml(query)}”.</p>\n`
+      : "";
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -249,12 +393,89 @@ ${discoveryLinks}
 <body>
 <main>
   <h1>FeedWatcher Newsletter</h1>
-  <p class="subtitle">${feeds.length} newsletter feed(s) available. Copy a feed URL into any RSS reader.</p>
-  <p class="manage-links"><a href="/manage">Manage feeds</a></p>
-  <ul class="feed-list">${items}
+  <p class="subtitle">${subtitle}</p>
+  <p class="manage-links"><a href="/manage">Manage feeds</a> · <a href="/status">Ingestion status</a></p>
+${banner}  <form class="filter-form" method="get" action="/rss/" role="search">
+    <label for="feed-filter">Filter feeds</label>
+    <input id="feed-filter" type="search" name="q" value="${escapeHtml(
+      query,
+    )}" placeholder="Title, sender or feed id"/>
+    <button class="primary" type="submit">Filter</button>
+    ${
+      query
+        ? `<a class="clear-filter" href="/rss/">Clear filter</a>`
+        : ""
+    }
+  </form>
+${emptyState}  <ul class="feed-list">${items}
   </ul>
 </main>
 <script>${COPY_SCRIPT}</script>
+</body>
+</html>
+`;
+}
+
+export interface StatusPageModel {
+  serverStatus: ServerStatus;
+  health: IngestionHealth;
+  cron: string;
+}
+
+function idleText(idle: { enabled: boolean; connected: boolean }): string {
+  if (!idle.enabled) {
+    return "disabled";
+  }
+  return idle.connected ? "enabled, connected" : "enabled, reconnecting";
+}
+
+// Human ingestion status page. No script: it reuses the index CSP and stays
+// readable without JavaScript. Every external value is escaped.
+export function renderStatusPage(model: StatusPageModel): string {
+  const { serverStatus, health } = model;
+  const lastSuccess = health.lastSuccessfulFetchAt
+    ? `${health.lastSuccessfulFetchAt} (${HealthFormatDuration(
+        health.lastSuccessfulFetchAgeSeconds,
+      )} ago)`
+    : "never since startup";
+  const storageWarning = health.storage.freshDataDirectory
+    ? `  <p class="warning" role="alert">The data directory was empty at startup: no journal, legacy store or UID marker was found. Ingestion will re-import the mailbox and may regenerate feed tokens. Check that the persistent <code>/data</code> volume is mounted.</p>\n`
+    : "";
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>FeedWatcher Newsletter — Status</title>
+<style>${SHARED_CSS}</style>
+</head>
+<body>
+<main>
+  <a class="back" href="/rss/">&larr; All feeds</a>
+  <h1>Ingestion status <span class="badge status-${health.status}">${health.status}</span></h1>
+  <p class="subtitle">Ingestion health since this process started.</p>
+  <p class="manage-links"><a href="/rss/">All feeds</a> · <a href="/manage">Manage feeds</a></p>
+${storageWarning}  <dl class="status-grid">
+    <dt>Last successful fetch</dt>
+    <dd>${escapeHtml(lastSuccess)}</dd>
+    <dt>Last error</dt>
+    <dd>${health.lastError ? escapeHtml(health.lastError) : "None reported."}</dd>
+    <dt>IMAP IDLE</dt>
+    <dd>${escapeHtml(idleText(health.idle))}</dd>
+    <dt>Retained records</dt>
+    <dd>${serverStatus.recordCount}</dd>
+    <dt>Resume marker</dt>
+    <dd>UID ${serverStatus.lastUid} / UIDVALIDITY ${serverStatus.uidvalidity}</dd>
+    <dt>Sanitized-body cache</dt>
+    <dd>${serverStatus.sanitizedBodyCache.entries} entries, ${serverStatus.sanitizedBodyCache.bytes} bytes</dd>
+    <dt>Fetch schedule</dt>
+    <dd>${escapeHtml(model.cron)} · stale after ${HealthFormatDuration(
+      health.staleAfterSeconds,
+    )} without success</dd>
+    <dt>Activity marker</dt>
+    <dd>a feed with no email for ${health.quietAfterDays} days is marked quiet</dd>
+  </dl>
+</main>
 </body>
 </html>
 `;

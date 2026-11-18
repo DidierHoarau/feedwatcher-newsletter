@@ -13,20 +13,39 @@ export interface ServerStatus {
   lastError: string | null;
 }
 
+// In-memory fetch state without the UID reads of ServerStatusGet: the health
+// banner and the catalogue use it on every request, and a missing UID file
+// must not be consulted there.
+export interface ServerFetchState {
+  lastSuccessfulFetchAt: string | null;
+  lastError: string | null;
+  lastChangeAtMs: number;
+}
+
 // In-memory fetch health: reset on restart, deliberately not persisted. The
 // endpoint is unauthenticated, so errors are reduced to one truncated line
 // (no stacks, credentials or email content).
 let lastSuccessfulFetchAt: string | null = null;
 let lastError: string | null = null;
+let lastChangeAtMs = 0;
 
-export function ServerStatusRecordFetchSuccess(): void {
-  lastSuccessfulFetchAt = new Date().toISOString();
+export function ServerStatusRecordFetchSuccess(atMs: number = Date.now()): void {
+  lastSuccessfulFetchAt = new Date(atMs).toISOString();
   lastError = null;
+  lastChangeAtMs = atMs;
 }
 
-export function ServerStatusRecordFetchError(error: unknown): void {
+export function ServerStatusRecordFetchError(
+  error: unknown,
+  atMs: number = Date.now(),
+): void {
   const message = error instanceof Error ? error.message : String(error);
   lastError = message.replace(/\s+/g, " ").trim().slice(0, 500) || "unknown error";
+  lastChangeAtMs = atMs;
+}
+
+export function ServerStatusGetFetchState(): ServerFetchState {
+  return { lastSuccessfulFetchAt, lastError, lastChangeAtMs };
 }
 
 export function ServerStatusGet(): ServerStatus {

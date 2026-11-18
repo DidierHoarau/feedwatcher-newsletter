@@ -231,6 +231,15 @@ describe("feed catalogue", () => {
 
     const catalogue = response.json() as {
       version: number;
+      health: {
+        status: string;
+        staleAfterSeconds: number;
+        quietAfterDays: number;
+        lastSuccessfulFetchAt: string | null;
+        idle: { enabled: boolean; connected: boolean };
+        lastError: string | null;
+        storageFresh: boolean;
+      };
       feeds: {
         feedId: string;
         title: string;
@@ -239,11 +248,34 @@ describe("feed catalogue", () => {
         itemCount: number;
         servedItemCount: number;
         latestDate: string;
+        lastEmailAt: string | null;
+        quiet: boolean;
         feedUrl: string;
         archiveUrl: string;
       }[];
     };
     expect(catalogue.version).toBe(1);
+    expect(Object.keys(catalogue).sort()).toEqual([
+      "feeds",
+      "health",
+      "version",
+    ]);
+    expect(Object.keys(catalogue.health).sort()).toEqual([
+      "idle",
+      "lastError",
+      "lastSuccessfulFetchAt",
+      "quietAfterDays",
+      "staleAfterSeconds",
+      "status",
+      "storageFresh",
+    ]);
+    expect(catalogue.health.status).toBe("starting");
+    expect(catalogue.health.staleAfterSeconds).toBe(7200);
+    expect(catalogue.health.quietAfterDays).toBe(7);
+    expect(catalogue.health.lastSuccessfulFetchAt).toBeNull();
+    expect(catalogue.health.idle).toEqual({ enabled: false, connected: false });
+    expect(catalogue.health.lastError).toBeNull();
+    expect(catalogue.health.storageFresh).toBe(true);
     expect(catalogue.feeds.map((feed) => feed.feedId)).toEqual([
       "morningbrew",
       "thedaily",
@@ -254,12 +286,16 @@ describe("feed catalogue", () => {
         "feedId",
         "feedUrl",
         "itemCount",
+        "lastEmailAt",
         "latestDate",
+        "quiet",
         "senderEmail",
         "senderName",
         "servedItemCount",
         "title",
       ]);
+      expect(feed.lastEmailAt).toBe(feed.latestDate);
+      expect(typeof feed.quiet).toBe("boolean");
       expect(feed.feedUrl).toContain(`/rss/${feed.feedId}.`);
       expect(feed.servedItemCount).toBe(feed.itemCount);
       expect(feed.archiveUrl).toBe(`${feed.feedUrl}/archive`);
@@ -643,6 +679,7 @@ describe("authentication", () => {
       "/api/feeds",
       "/api/feeds/settings",
       "/manage",
+      "/status",
     ];
 
     for (const url of paths) {
@@ -1113,6 +1150,7 @@ describe("journal independence at the route level", () => {
         "/rss/thedaily",
         `/view/${DAILY_ID}`,
         "/api/feeds",
+        "/status",
       ];
       for (const url of urls) {
         const response = await fastify.inject({ method: "GET", url });
@@ -1452,6 +1490,29 @@ describe("security headers", () => {
       "frame-ancestors 'none'",
     );
     expect(response.headers["x-content-type-options"]).toBe("nosniff");
+  });
+
+  it("serves the status page with the HTML CSP, no script and no-store", async () => {
+    const fastify = build(makeConfig());
+    const index = await fastify.inject({
+      method: "GET",
+      url: "/rss/",
+      headers: { accept: "text/html" },
+    });
+    const status = await fastify.inject({
+      method: "GET",
+      url: "/status",
+    });
+
+    expect(status.statusCode).toBe(200);
+    expect(status.headers["content-type"]).toContain("text/html");
+    expect(status.headers["content-security-policy"]).toBe(
+      index.headers["content-security-policy"],
+    );
+    expect(status.headers["cache-control"]).toBe("no-store");
+    expect(status.headers["x-content-type-options"]).toBe("nosniff");
+    expect(status.headers["x-frame-options"]).toBe("DENY");
+    expect(status.body).not.toContain("<script");
   });
 
   it("keeps the CSP and ETag stable across requests", async () => {

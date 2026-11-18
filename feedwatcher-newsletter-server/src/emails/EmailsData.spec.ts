@@ -9,6 +9,7 @@ import {
   EmailsDataGetFeedLastModified,
   EmailsDataGetLastModified,
   EmailsDataGetRecordCount,
+  EmailsDataGetStorageState,
   EmailFeedIdsListAllForTokens,
   EmailFeedsListAll,
   EmailFeedsListAllForManagement,
@@ -905,5 +906,58 @@ describe("feed settings in the index", () => {
     const ids = EmailFeedsListAll().map((feed) => feed.feedId);
     expect(ids).toContain("separate");
     expect(ids).toContain("ab");
+  });
+});
+
+describe("EmailsDataGetStorageState", () => {
+  it("reports a fresh directory when nothing was persisted before init", () => {
+    expect(EmailsDataGetStorageState()).toEqual({
+      journalExisted: false,
+      legacyJournalExisted: false,
+      uidMarkerExisted: false,
+      freshDataDirectory: true,
+    });
+  });
+
+  it("detects an existing journal, legacy store or UID marker", () => {
+    const journalDir = fs.mkdtempSync(path.join(os.tmpdir(), "emailsdata-"));
+    fs.writeFileSync(path.join(journalDir, "emails.jsonl"), "");
+    EmailsDataInit(7, journalDir);
+    expect(EmailsDataGetStorageState()).toEqual({
+      journalExisted: true,
+      legacyJournalExisted: false,
+      uidMarkerExisted: false,
+      freshDataDirectory: false,
+    });
+
+    const legacyDir = fs.mkdtempSync(path.join(os.tmpdir(), "emailsdata-"));
+    fs.writeFileSync(path.join(legacyDir, "emails.json"), "[]");
+    EmailsDataInit(7, legacyDir);
+    const legacy = EmailsDataGetStorageState();
+    expect(legacy.legacyJournalExisted).toBe(true);
+    expect(legacy.freshDataDirectory).toBe(false);
+    expect(fs.existsSync(path.join(legacyDir, "emails.json.migrated"))).toBe(
+      true,
+    );
+
+    const uidDir = fs.mkdtempSync(path.join(os.tmpdir(), "emailsdata-"));
+    fs.writeFileSync(path.join(uidDir, "last-uid.json"), '{"uid":1}');
+    EmailsDataInit(7, uidDir);
+    const uid = EmailsDataGetStorageState();
+    expect(uid.uidMarkerExisted).toBe(true);
+    expect(uid.freshDataDirectory).toBe(false);
+  });
+
+  it("captures the state before the journal is created by the first save", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "emailsdata-"));
+    EmailsDataInit(7, dir);
+    EmailItemsBatchSave([makeItem()]);
+    expect(fs.existsSync(path.join(dir, "emails.jsonl"))).toBe(true);
+    expect(EmailsDataGetStorageState().journalExisted).toBe(false);
+    expect(EmailsDataGetStorageState().freshDataDirectory).toBe(true);
+
+    EmailsDataInit(7, dir);
+    expect(EmailsDataGetStorageState().journalExisted).toBe(true);
+    expect(EmailsDataGetStorageState().freshDataDirectory).toBe(false);
   });
 });

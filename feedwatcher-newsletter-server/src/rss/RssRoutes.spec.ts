@@ -15,6 +15,10 @@ import {
   FeedIdentityInit,
 } from "../feeds/FeedIdentity";
 import { FeedSettingsSave } from "../feeds/FeedSettings";
+import {
+  ServerStatusRecordFetchError,
+  ServerStatusRecordFetchSuccess,
+} from "../ServerStatus";
 import * as OTelContextMock from "../OTelContext";
 import { RssRoutes } from "./RssRoutes";
 
@@ -435,5 +439,134 @@ describe("feed settings: hidden and merged feeds", () => {
     });
     expect(response.statusCode).toBe(200);
     expect(response.body).not.toContain("tracker.example");
+  });
+});
+
+describe("index filter, activity sort and preview", () => {
+  function seedMore(): void {
+    EmailItemsBatchSave([
+      makeItem({
+        id: "22222222-2222-4222-8222-222222222222",
+        messageId: "<daily-2@example.com>",
+        subject: "Second daily issue",
+        body: "<p>Second body</p>",
+        dateReceived: "2026-10-16T08:00:00.000Z",
+        dateCreated: "2026-10-16T08:00:00.000Z",
+      }),
+      makeItem({
+        id: "33333333-3333-4333-8333-333333333333",
+        messageId: "<daily-3@example.com>",
+        subject: "Third daily issue",
+        body: "<p>Third body</p>",
+        dateReceived: "2026-10-17T08:00:00.000Z",
+        dateCreated: "2026-10-17T08:00:00.000Z",
+      }),
+      makeItem({
+        id: "44444444-4444-4444-8444-444444444444",
+        messageId: "<brew-1@example.com>",
+        senderName: "Morning Brew",
+        senderEmail: "brew@morningbrew.com",
+        subject: "Brew issue",
+        body: "<p>Brew body</p>",
+        dateReceived: "2026-10-18T08:00:00.000Z",
+        dateCreated: "2026-10-18T08:00:00.000Z",
+      }),
+    ]);
+  }
+
+  it("filters the HTML index server-side with q", async () => {
+    seedMore();
+    const response = await fastify.inject({
+      method: "GET",
+      url: "/rss/?q=brew",
+      headers: { accept: "text/html" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain("Showing 1 of 2 feed(s) matching");
+    expect(response.body).toContain("Morning Brew");
+    expect(response.body).not.toContain("The Daily");
+    expect(response.body).toContain('<a class="clear-filter" href="/rss/">');
+  });
+
+  it("sorts the index by recent activity", async () => {
+    seedMore();
+    const response = await fastify.inject({
+      method: "GET",
+      url: "/rss/",
+      headers: { accept: "text/html" },
+    });
+    expect(response.body.indexOf("Morning Brew")).toBeLessThan(
+      response.body.indexOf("The Daily"),
+    );
+  });
+
+  it("shows a two-item preview while the archive keeps every retained email", async () => {
+    seedMore();
+    const urlId = FeedIdentityGetFeedUrlId("thedaily");
+    const index = await fastify.inject({
+      method: "GET",
+      url: "/rss/",
+      headers: { accept: "text/html" },
+    });
+    expect(index.body).toContain("Latest issues");
+    expect(index.body).toContain("Third daily issue");
+    expect(index.body).toContain("Second daily issue");
+    expect(index.body).not.toContain(">Daily issue<");
+
+    const archive = await fastify.inject({
+      method: "GET",
+      url: `/rss/${urlId}/archive`,
+    });
+    expect(archive.body).toContain("Third daily issue");
+    expect(archive.body).toContain("Second daily issue");
+    expect(archive.body).toContain(">Daily issue<");
+    expect(archive.body).toContain("3 retained email(s)");
+  });
+
+  it("keeps the JSON list unfiltered and in title order", async () => {
+    seedMore();
+    const response = await fastify.inject({
+      method: "GET",
+      url: "/rss/?q=brew",
+    });
+    const feeds = response.json() as { feedId: string }[];
+    expect(feeds.map((feed) => feed.feedId)).toEqual([
+      "morningbrew",
+      "thedaily",
+    ]);
+  });
+
+  it("shows a stale banner, escapes the last error and links to /status", async () => {
+    try {
+      ServerStatusRecordFetchSuccess(Date.now() - 3 * 60 * 60 * 1000);
+      ServerStatusRecordFetchError(
+        new Error('<script>alert(1)</script> connection refused'),
+      );
+      const response = await fastify.inject({
+        method: "GET",
+        url: "/rss/",
+        headers: { accept: "text/html" },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.body).toContain('class="banner" role="status"');
+      expect(response.body).toContain("Ingestion looks stale");
+      expect(response.body).toContain('<a href="/status">Ingestion status</a>');
+      expect(response.body).toContain(
+        "&lt;script&gt;alert(1)&lt;/script&gt; connection refused",
+      );
+      expect(response.body).not.toContain("<script>alert(1)</script>");
+    } finally {
+      ServerStatusRecordFetchSuccess();
+    }
+  });
+
+  it("shows no banner while ingestion is healthy", async () => {
+    ServerStatusRecordFetchSuccess();
+    const response = await fastify.inject({
+      method: "GET",
+      url: "/rss/",
+      headers: { accept: "text/html" },
+    });
+    expect(response.body).not.toContain('class="banner"');
   });
 });
