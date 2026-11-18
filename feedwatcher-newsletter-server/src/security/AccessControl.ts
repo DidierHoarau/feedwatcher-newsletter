@@ -44,9 +44,10 @@ export function AccessControlIsAuthorized(
 }
 
 // Encapsulated request hook: registering it on a plugin scope protects only
-// the routes of that scope (/ , /rss/* and /view/*), leaving /api/status open.
-// When no password is configured the hook returns immediately: behaviour is
-// unchanged and existing readers keep working.
+// the routes of that scope (/ , /rss/*, /view/*, /manage and the /api/feeds
+// endpoints), leaving /api/status open. When no password is configured the
+// hook returns immediately: behaviour is unchanged and existing readers keep
+// working.
 export function AccessControlRegisterHook(
   fastify: FastifyInstance,
   config: Config,

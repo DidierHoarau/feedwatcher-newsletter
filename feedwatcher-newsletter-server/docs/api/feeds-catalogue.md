@@ -8,9 +8,10 @@ OPML.
 ## Authentication
 
 `/api/feeds` is registered in the same access-control scope as `/rss/*`,
-`/` and `/view/*`. When `AUTH_PASSWORD` is non-empty, every request needs HTTP
-Basic credentials (`AUTH_USERNAME`, default `feedwatcher`) and returns `401`
-otherwise. `/api/status` stays unauthenticated for readiness probes.
+`/`, `/view/*`, `/manage` and `/api/feeds/settings`. When `AUTH_PASSWORD` is
+non-empty, every request needs HTTP Basic credentials (`AUTH_USERNAME`, default
+`feedwatcher`) and returns `401` otherwise. `/api/status` stays unauthenticated
+for readiness probes.
 
 ## Example payload
 
@@ -51,17 +52,21 @@ otherwise. `/api/status` stays unauthenticated for readiness probes.
 | `version`     | number | Catalogue contract version, currently `1`. |
 | `feeds`       | array  | Every offered feed, deterministically ordered. |
 | `feedId`      | string | Stable key derived from the sender (or `FEED_OVERRIDES`). Unchanged when a private token rotates. |
-| `title`       | string | Feed title: the `FEED_OVERRIDES` title when configured, otherwise the sender name. |
-| `senderName`  | string | Sender display name of the feed's latest email. |
+| `title`       | string | Feed title: the `feed-settings.json` per-feed title when configured, otherwise the `FEED_OVERRIDES` title, otherwise the sender name. |
+| `senderName`  | string | Sender display name of the feed's latest email (for a merged feed, across its sources). |
 | `senderEmail` | string | Sender address of the feed's latest email. |
-| `itemCount`   | number | Number of retained emails in the feed. |
-| `servedItemCount` | number | Number of emails the RSS feed actually serves: `min(itemCount, FEED_MAX_ITEMS)`, or `itemCount` when the cap is `0`. |
+| `itemCount`   | number | Number of retained emails in the feed; a merged source's items are counted in its target. |
+| `servedItemCount` | number | Number of emails the RSS feed actually serves: `min(itemCount, maxItems)`, where the per-feed `maxItems` overrides `FEED_MAX_ITEMS`; `itemCount` when the cap is `0`. |
 | `latestDate`  | string | Effective received date of the latest retained email, ISO‑8601: the sender `Date` header clamped to the local ingestion time, so it is never in the future. |
 | `feedUrl`     | string | Currently advertised feed URL (`/rss/<feedId>` or `/rss/<feedId>.<token>`). |
 | `archiveUrl`  | string | HTML archive of **all retained** emails of the feed: `feedUrl` + `/archive`. Exactly as protected as `feedUrl` (same capability token / Basic auth). |
 
 Ignored senders (`SENDER_IGNORE_LIST`) and emails without a usable sender are
-never listed.
+never listed. Feeds hidden or merged away by `DATA_DIR/feed-settings.json`
+(see [feed-settings.md](feed-settings.md)) are not listed either: a hidden feed
+is absent from every representation and returns `404`, while a merged source's
+items appear under its final target. The contract version stays `1` because
+the filtering is a curation state, not a schema change.
 
 ## Versioning rule
 
@@ -105,6 +110,9 @@ gzip/brotli when the client advertises support and the body exceeds 1 KiB.
   retained** email (subject, date, sender, summary), newest first, and is
   linked from the HTML index and from `/view/:emailId`.
 - `GET /view/:emailId` permalinks every retained email.
+- `GET /manage` is the server-rendered curation page behind the same auth
+  scope; its saves and `PUT /api/feeds/settings` immediately change the
+  catalogue (hidden/merge filtering, titles, per-feed limits).
 
 `feedId`, `title` and `itemCount` are the same values in every representation.
 
@@ -124,6 +132,10 @@ what `/rss/:id` returns — nothing is deleted or reordered. `itemCount` and
   `^[a-z0-9][a-z0-9-]{0,63}$` (lowercase ASCII letters, digits and hyphens); an
   invalid value (dot, slash, uppercase, empty, ...) is ignored with a warning
   and the derived id is used.
+- `feed-settings.json` (managed by `/manage` or `PUT /api/feeds/settings`) has
+  higher precedence than `FEED_OVERRIDES`: an exact sender rule can override a
+  feed id and title, and a per-feed title/`maxItems` overrides the environment
+  for that feed. See [feed-settings.md](feed-settings.md).
 - Without an override, `feedId` is derived from the sender name by lowercasing
   it and removing non-alphanumeric characters (`"The Daily Newsletter"` →
   `thedailynewsletter`). A name with no ASCII alphanumeric character (Cyrillic,

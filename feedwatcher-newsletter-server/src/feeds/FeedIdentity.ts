@@ -2,6 +2,11 @@ import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import * as fse from "fs-extra";
 import path from "path";
 import { OTelLogger } from "../OTelContext";
+import {
+  FEED_ID_PATTERN,
+  FeedSettingsFindSenderRule,
+  FeedSettingsInit,
+} from "./FeedSettings";
 
 const logger = OTelLogger().createModuleLogger("FeedIdentity");
 
@@ -17,11 +22,6 @@ interface FeedIdentityOptions {
   privateUrlsStrict?: boolean;
   dataDir: string;
 }
-
-// Feed ids reach URLs and file contents, so they are restricted to lowercase
-// ASCII: a dot would break the `<feedId>.<token>` format, and a slash or an
-// empty id produces an unreachable feed.
-const FEED_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 let ignoreTerms: string[] = [];
 let overrides: Record<string, FeedOverride> = {};
@@ -71,6 +71,9 @@ function sanitizeOverrides(
 }
 
 export function FeedIdentityInit(options: FeedIdentityOptions): void {
+  // Every initialization path (startup, config reload, tests) loads the
+  // optional feed-settings.json together with the environment defaults.
+  FeedSettingsInit(options.dataDir);
   ignoreTerms = options.ignoreList
     .split(",")
     .map((term) => term.trim().toLowerCase())
@@ -191,12 +194,17 @@ function deriveFeedId(senderName: string): string {
   return `sender-${hash}`;
 }
 
-// Feed id: configured override feedId when the sender matches one, otherwise
-// derived from the sender name (lowercased, non-alphanumerics removed).
+// Feed id: a sender rule from feed-settings.json wins, then a configured
+// FEED_OVERRIDES feedId, otherwise the id derived from the sender name
+// (lowercased, non-alphanumerics removed).
 export function FeedIdentityGetFeedId(
   senderName: string,
   senderEmail: string,
 ): string {
+  const senderRule = FeedSettingsFindSenderRule(senderName, senderEmail);
+  if (senderRule && senderRule.feedId) {
+    return senderRule.feedId;
+  }
   const override = findOverride(senderName, senderEmail);
   if (override && override.feedId) {
     return override.feedId;
@@ -204,12 +212,16 @@ export function FeedIdentityGetFeedId(
   return deriveFeedId(senderName);
 }
 
-// Feed title: the override title of the feed when one is configured,
-// otherwise the sender name it was derived from.
+// Feed title: a feed-settings.json sender rule title wins, then the
+// FEED_OVERRIDES title, otherwise the sender name it was derived from.
 export function FeedIdentityGetTitle(
   senderName: string,
   senderEmail: string,
 ): string {
+  const senderRule = FeedSettingsFindSenderRule(senderName, senderEmail);
+  if (senderRule && senderRule.title) {
+    return senderRule.title;
+  }
   const override = findOverride(senderName, senderEmail);
   if (override && override.title) {
     return override.title;

@@ -14,6 +14,7 @@ import {
   FeedIdentityGetFeedUrlId,
   FeedIdentityInit,
 } from "../feeds/FeedIdentity";
+import { FeedSettingsSave } from "../feeds/FeedSettings";
 import * as OTelContextMock from "../OTelContext";
 import { RssRoutes } from "./RssRoutes";
 
@@ -329,5 +330,110 @@ describe("feed archive", () => {
     expect(archive.body).toContain(
       "3 retained email(s). The RSS feed serves the newest 1.",
     );
+  });
+});
+
+describe("feed settings: hidden and merged feeds", () => {
+  function seedBrew(): void {
+    EmailItemsBatchSave([
+      makeItem({
+        id: "22222222-2222-4222-8222-222222222222",
+        messageId: "<brew-1@example.com>",
+        senderName: "Morning Brew",
+        senderEmail: "brew@morningbrew.com",
+        subject: "Brew issue",
+      }),
+    ]);
+    FeedIdentityEnsureTokens(["thedaily", "morningbrew"]);
+  }
+
+  it("returns 404 for a hidden feed and its archive, then restores it", async () => {
+    const urlId = FeedIdentityGetFeedUrlId("thedaily");
+    FeedSettingsSave({ version: 1, feeds: { thedaily: { hidden: true } } });
+
+    const feed = await fastify.inject({ method: "GET", url: `/rss/${urlId}` });
+    expect(feed.statusCode).toBe(404);
+    const archive = await fastify.inject({
+      method: "GET",
+      url: `/rss/${urlId}/archive`,
+    });
+    expect(archive.statusCode).toBe(404);
+
+    FeedSettingsSave({ version: 1, feeds: {} });
+    const restored = await fastify.inject({
+      method: "GET",
+      url: `/rss/${urlId}`,
+    });
+    expect(restored.statusCode).toBe(200);
+  });
+
+  it("redirects a merged source to the target feed and archive", async () => {
+    seedBrew();
+    FeedSettingsSave({
+      version: 1,
+      feeds: { morningbrew: { mergeInto: "thedaily" } },
+    });
+    const sourceUrlId = FeedIdentityGetFeedUrlId("morningbrew");
+    const targetUrlId = FeedIdentityGetFeedUrlId("thedaily");
+
+    const feed = await fastify.inject({
+      method: "GET",
+      url: `/rss/${sourceUrlId}`,
+    });
+    expect(feed.statusCode).toBe(302);
+    expect(feed.headers.location).toBe(`/rss/${targetUrlId}`);
+
+    const followed = await fastify.inject({
+      method: "GET",
+      url: String(feed.headers.location),
+    });
+    expect(followed.statusCode).toBe(200);
+    expect(followed.body).toContain("Daily issue");
+    expect(followed.body).toContain("Brew issue");
+
+    const archive = await fastify.inject({
+      method: "GET",
+      url: `/rss/${sourceUrlId}/archive`,
+    });
+    expect(archive.statusCode).toBe(302);
+    expect(archive.headers.location).toBe(`/rss/${targetUrlId}/archive`);
+  });
+
+  it("returns 404 for a source whose final merge target is hidden", async () => {
+    seedBrew();
+    FeedSettingsSave({
+      version: 1,
+      feeds: {
+        morningbrew: { mergeInto: "thedaily" },
+        thedaily: { hidden: true },
+      },
+    });
+    const response = await fastify.inject({
+      method: "GET",
+      url: `/rss/${FeedIdentityGetFeedUrlId("morningbrew")}`,
+    });
+    expect(response.statusCode).toBe(404);
+  });
+
+  it("serves per-feed privacy and item settings", async () => {
+    const pixel = makeItem({
+      id: "33333333-3333-4333-8333-333333333333",
+      messageId: "<pixel@example.com>",
+      subject: "Pixel issue",
+      body: '<p>Pixel</p><img src="https://tracker.example/p.gif" width="1">',
+    });
+    EmailItemsBatchSave([pixel]);
+    config.EMAIL_STRIP_TRACKING_PIXELS = false;
+    FeedSettingsSave({
+      version: 1,
+      feeds: { thedaily: { stripTrackingPixels: true, maxItems: 0 } },
+    });
+
+    const response = await fastify.inject({
+      method: "GET",
+      url: `/rss/${FeedIdentityGetFeedUrlId("thedaily")}`,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).not.toContain("tracker.example");
   });
 });

@@ -9,6 +9,7 @@ import {
   EmailsDataInit,
   EmailsDataPurgeExpired,
   EmailsDataSetRetentionDays,
+  EmailFeedIdsListAllForTokens,
   EmailFeedsListAll,
 } from "./emails/EmailsData";
 import {
@@ -42,7 +43,7 @@ const RESTART_ONLY_FIELDS = [
 
 const SHUTDOWN_WAIT_TIMEOUT_MS = 10000;
 
-function logAvailableFeeds(span: Span): void {
+function logAvailableFeeds(span?: Span): void {
   try {
     logger.info(`Available RSS feeds: ${EmailFeedsListAll().length}`, span);
   } catch (err) {
@@ -55,14 +56,32 @@ function logAvailableFeeds(span: Span): void {
 }
 
 // Persist missing feed tokens in one batch after an index build, so listing
-// requests never write. Token persistence must never fail a fetch or a reload.
+// requests never write. The union of base, final and settings-referenced ids
+// keeps a token alive across hide/merge changes and tokens are never revoked
+// here: a hidden or merged feed's existing subscription URL starts working
+// again as soon as it is unhidden or unmerged. Token persistence must never
+// fail a fetch or a reload.
 function ensureFeedTokens(span?: Span): void {
   try {
-    FeedIdentityEnsureTokens(EmailFeedsListAll().map((feed) => feed.feedId));
+    FeedIdentityEnsureTokens(EmailFeedIdsListAllForTokens());
   } catch (err) {
     logger.warn(
       `Unable to persist feed tokens: ${(err as Error).message}`,
       span,
+    );
+  }
+}
+
+// Feed settings are applied by bumping their generation; reading the token id
+// list rebuilds the index on the next access. Called after an API/UI save and
+// after a hot reload of feed-settings.json, and must never throw.
+export function SchedulerOnFeedSettingsChanged(): void {
+  try {
+    ensureFeedTokens();
+    logAvailableFeeds();
+  } catch (err) {
+    logger.warn(
+      `Unable to apply feed settings change: ${(err as Error).message}`,
     );
   }
 }
@@ -278,7 +297,7 @@ export async function SchedulerInit(context: Span, configIn: Config) {
   // Startup-only pruning: a temporarily changed ignore list must not revoke
   // tokens of feeds that may come back.
   try {
-    FeedIdentityPruneTokens(EmailFeedsListAll().map((feed) => feed.feedId));
+    FeedIdentityPruneTokens(EmailFeedIdsListAllForTokens());
   } catch (err) {
     logger.warn(
       `Unable to prune feed tokens: ${(err as Error).message}`,

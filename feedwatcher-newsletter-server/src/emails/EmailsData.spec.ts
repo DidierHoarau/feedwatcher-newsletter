@@ -9,7 +9,9 @@ import {
   EmailsDataGetFeedLastModified,
   EmailsDataGetLastModified,
   EmailsDataGetRecordCount,
+  EmailFeedIdsListAllForTokens,
   EmailFeedsListAll,
+  EmailFeedsListAllForManagement,
   EmailItemGetById,
   EmailItemGetEffectiveDateReceived,
   EmailItemsBatchSave,
@@ -17,6 +19,7 @@ import {
   EmailItemsListById,
   EmailsDataPurgeExpired,
 } from "./EmailsData";
+import { FeedSettingsSave } from "../feeds/FeedSettings";
 import { EmailItem } from "./EmailFetcher";
 import {
   FeedIdentityEnsureTokens,
@@ -800,5 +803,107 @@ describe("feed ids for real sender names", () => {
     });
     expect(EmailFeedsListAll()).toHaveLength(1);
     expect(collisionWarnings()).toHaveLength(1);
+  });
+});
+
+describe("feed settings in the index", () => {
+  function seedTwoFeeds(): void {
+    EmailItemsBatchSave([
+      makeItem({ messageId: "<daily@example.com>" }),
+      makeItem({
+        id: "bbbbbbbb-2222-4222-8222-222222222222",
+        messageId: "<brew@example.com>",
+        senderName: "Morning Brew",
+        senderEmail: "brew@morningbrew.com",
+      }),
+    ]);
+  }
+
+  it("renames a feed with the per-feed title", () => {
+    seedTwoFeeds();
+    FeedSettingsSave({
+      version: 1,
+      feeds: { thedaily: { title: "Daily Brief" } },
+    });
+    const daily = EmailFeedsListAll().find((feed) => feed.feedId === "thedaily");
+    expect(daily?.title).toBe("Daily Brief");
+    expect(
+      EmailFeedsListAllForManagement().find((feed) => feed.feedId === "thedaily")
+        ?.title,
+    ).toBe("Daily Brief");
+  });
+
+  it("hides a feed from listings but keeps it in management and tokens", () => {
+    seedTwoFeeds();
+    FeedSettingsSave({ version: 1, feeds: { thedaily: { hidden: true } } });
+
+    expect(EmailFeedsListAll().map((feed) => feed.feedId)).toEqual([
+      "morningbrew",
+    ]);
+    expect(EmailItemsListById("thedaily")).toEqual([]);
+    const management = EmailFeedsListAllForManagement().find(
+      (feed) => feed.feedId === "thedaily",
+    );
+    expect(management?.hidden).toBe(true);
+    expect(management?.itemCount).toBe(1);
+    expect(EmailFeedIdsListAllForTokens()).toEqual(
+      expect.arrayContaining(["morningbrew", "thedaily"]),
+    );
+
+    // Unhiding restores the feed with its items.
+    FeedSettingsSave({ version: 1, feeds: {} });
+    expect(EmailFeedsListAll().map((feed) => feed.feedId)).toContain("thedaily");
+    expect(EmailItemsListById("thedaily")).toHaveLength(1);
+  });
+
+  it("merges a source into the target and counts its items there", () => {
+    seedTwoFeeds();
+    FeedSettingsSave({
+      version: 1,
+      feeds: { morningbrew: { mergeInto: "thedaily" } },
+    });
+
+    const feeds = EmailFeedsListAll();
+    expect(feeds.map((feed) => feed.feedId)).toEqual(["thedaily"]);
+    expect(feeds[0].itemCount).toBe(2);
+    expect(EmailItemsListById("thedaily")).toHaveLength(2);
+    const management = EmailFeedsListAllForManagement().find(
+      (feed) => feed.feedId === "morningbrew",
+    );
+    expect(management?.mergedInto).toBe("thedaily");
+    expect(EmailFeedIdsListAllForTokens()).toEqual(
+      expect.arrayContaining(["morningbrew", "thedaily"]),
+    );
+  });
+
+  it("hides a merged source when its final target is hidden", () => {
+    seedTwoFeeds();
+    FeedSettingsSave({
+      version: 1,
+      feeds: {
+        morningbrew: { mergeInto: "thedaily" },
+        thedaily: { hidden: true },
+      },
+    });
+    expect(EmailFeedsListAll()).toEqual([]);
+  });
+
+  it("applies sender rules from the settings file to grouping", () => {
+    EmailItemsBatchSave([
+      makeItem({ messageId: "<a@example.com>", senderName: "A/B" }),
+      makeItem({
+        id: "cccccccc-3333-4333-8333-333333333333",
+        messageId: "<ab@example.com>",
+        senderName: "AB",
+      }),
+    ]);
+    FeedSettingsSave({
+      version: 1,
+      feeds: {},
+      senders: { "ab": { feedId: "separate" } },
+    });
+    const ids = EmailFeedsListAll().map((feed) => feed.feedId);
+    expect(ids).toContain("separate");
+    expect(ids).toContain("ab");
   });
 });
