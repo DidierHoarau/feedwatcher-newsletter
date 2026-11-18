@@ -140,6 +140,7 @@ describe("feed listing routes", () => {
     expect(response.headers["content-type"]).toContain("text/html");
     expect(response.body).toContain("The Daily");
     expect(response.body).toContain("/rss/thedaily.");
+    expect(response.body).toContain("/archive");
     expect(response.body).not.toContain("Billing Team");
   });
 
@@ -235,8 +236,10 @@ describe("feed catalogue", () => {
         senderName: string;
         senderEmail: string;
         itemCount: number;
+        servedItemCount: number;
         latestDate: string;
         feedUrl: string;
+        archiveUrl: string;
       }[];
     };
     expect(catalogue.version).toBe(1);
@@ -246,19 +249,26 @@ describe("feed catalogue", () => {
     ]);
     for (const feed of catalogue.feeds) {
       expect(Object.keys(feed).sort()).toEqual([
+        "archiveUrl",
         "feedId",
         "feedUrl",
         "itemCount",
         "latestDate",
         "senderEmail",
         "senderName",
+        "servedItemCount",
         "title",
       ]);
       expect(feed.feedUrl).toContain(`/rss/${feed.feedId}.`);
+      expect(feed.servedItemCount).toBe(feed.itemCount);
+      expect(feed.archiveUrl).toBe(`${feed.feedUrl}/archive`);
     }
     const daily = catalogue.feeds.find((feed) => feed.feedId === "thedaily");
     expect(daily?.title).toBe("The Daily");
     expect(daily?.itemCount).toBe(3);
+    expect(daily?.servedItemCount).toBe(3);
+    expect(daily?.archiveUrl).toContain(`/rss/thedaily.`);
+    expect(daily?.archiveUrl).toMatch(/\/archive$/);
     expect(daily?.latestDate).toBe("2026-10-16T08:00:00.000Z");
     expect(response.body).not.toContain("Billing Team");
     expect(response.body).not.toContain("billing@shop.com");
@@ -448,6 +458,8 @@ describe("view route", () => {
     expect(response.statusCode).toBe(200);
     expect(response.headers["content-type"]).toContain("text/html");
     expect(response.body).toContain("Daily issue");
+    expect(response.body).toContain('class="nav-archive"');
+    expect(response.body).toContain("/archive");
   });
 
   it("returns 404 for an unknown email id", async () => {
@@ -582,6 +594,7 @@ describe("authentication", () => {
       "/rss/",
       "/rss/opml",
       `/rss/${urlId}`,
+      `/rss/${urlId}/archive`,
       `/view/${DAILY_ID}`,
       "/api/feeds",
     ];
@@ -1230,6 +1243,114 @@ describe("newsletter layout fidelity", () => {
       index.headers["content-security-policy"],
     );
     expect(view.body).not.toContain("<script");
+  });
+});
+
+describe("feed window and archive", () => {
+  let isolatedDir: string;
+  const WINDOW_IDS = [
+    "a1000001-0000-4000-8000-000000000001",
+    "a1000002-0000-4000-8000-000000000002",
+    "a1000003-0000-4000-8000-000000000003",
+    "a1000004-0000-4000-8000-000000000004",
+  ];
+
+  beforeEach(() => {
+    isolatedDir = fs.mkdtempSync(path.join(os.tmpdir(), "appbuilder-window-"));
+    EmailsDataInit(7, isolatedDir);
+    FeedIdentityInit({
+      ignoreList: "",
+      overrides: {},
+      privateUrls: true,
+      dataDir: isolatedDir,
+    });
+    EmailItemsBatchSave(
+      WINDOW_IDS.map((id, index) =>
+        makeItem({
+          id,
+          messageId: `<window-${index + 1}@example.com>`,
+          subject: `Window issue ${index + 1}`,
+          body: `<p>Window body ${index + 1}</p>`,
+          dateReceived: `2026-10-${10 + index}T08:00:00.000Z`,
+          dateCreated: `2026-10-${10 + index}T08:00:00.000Z`,
+        }),
+      ),
+    );
+    FeedIdentityEnsureTokens(["thedaily"]);
+  });
+
+  afterEach(() => {
+    EmailsDataInit(7, dataDir);
+    initFeedIdentity();
+  });
+
+  it("caps the feed, keeps the archive complete and reports the window", async () => {
+    const fastify = build(
+      makeConfig({ DATA_DIR: isolatedDir, FEED_MAX_ITEMS: 2 }),
+    );
+    const urlId = FeedIdentityGetFeedUrlId("thedaily");
+
+    const feed = await fastify.inject({ method: "GET", url: `/rss/${urlId}` });
+    expect(feed.statusCode).toBe(200);
+    expect((feed.body.match(/<item>/g) || [])).toHaveLength(2);
+    expect(feed.body).toContain("Window issue 4");
+    expect(feed.body).toContain("Window issue 3");
+    expect(feed.body).not.toContain("Window issue 2");
+    expect(feed.body).not.toContain("Window issue 1");
+
+    const archiveUrl = `/rss/${urlId}/archive`;
+    const archive = await fastify.inject({ method: "GET", url: archiveUrl });
+    expect(archive.statusCode).toBe(200);
+    for (let index = 1; index <= 4; index += 1) {
+      expect(archive.body).toContain(`Window issue ${index}`);
+    }
+    expect(archive.body).toContain(
+      "4 retained email(s). The RSS feed serves the newest 2.",
+    );
+
+    const catalogue = (
+      await fastify.inject({ method: "GET", url: "/api/feeds" })
+    ).json() as {
+      feeds: {
+        feedId: string;
+        itemCount: number;
+        servedItemCount: number;
+        feedUrl: string;
+        archiveUrl: string;
+      }[];
+    };
+    const daily = catalogue.feeds.find((feed) => feed.feedId === "thedaily");
+    expect(daily?.itemCount).toBe(4);
+    expect(daily?.servedItemCount).toBe(2);
+    expect(daily?.feedUrl).toContain(`/rss/thedaily.`);
+    expect(daily?.archiveUrl).toBe(`${daily?.feedUrl}/archive`);
+
+    const etag = archive.headers.etag as string;
+    const notModified = await fastify.inject({
+      method: "GET",
+      url: archiveUrl,
+      headers: { "if-none-match": etag },
+    });
+    expect(notModified.statusCode).toBe(304);
+
+    EmailItemsBatchSave([
+      makeItem({
+        id: "a1000005-0000-4000-8000-000000000005",
+        messageId: "<window-5@example.com>",
+        subject: "Window issue 5",
+        body: "<p>Window body 5</p>",
+        dateReceived: new Date().toISOString(),
+        dateCreated: new Date().toISOString(),
+      }),
+    ]);
+    const changed = await fastify.inject({
+      method: "GET",
+      url: archiveUrl,
+      headers: { "if-none-match": etag },
+    });
+    expect(changed.statusCode).toBe(200);
+    expect(changed.headers.etag).not.toBe(etag);
+    expect(changed.body).toContain("Window issue 5");
   });
 });
 

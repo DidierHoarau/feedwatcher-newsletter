@@ -77,6 +77,7 @@ function makeItem(overrides: Partial<EmailItem> = {}): EmailItem {
 
 let dataDir: string;
 let fastify: FastifyInstance;
+let config: Config;
 
 beforeEach(() => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "rssroutes-"));
@@ -88,7 +89,7 @@ beforeEach(() => {
     dataDir,
   });
   EmailItemsBatchSave([makeItem()]);
-  const config = Object.assign(new Config(), {
+  config = Object.assign(new Config(), {
     PUBLIC_URL: "",
     DATA_DIR: dataDir,
   });
@@ -184,5 +185,149 @@ describe("feed ids without Latin characters", () => {
 
     expect(fs.readFileSync(tokensPath, "utf8")).toBe(before);
     expect(fs.statSync(tokensPath).mtimeMs).toBe(mtime);
+  });
+});
+
+describe("feed archive", () => {
+  it("serves a tokenized archive with subject, summary, date and view link", async () => {
+    const urlId = FeedIdentityGetFeedUrlId("thedaily");
+    const response = await fastify.inject({
+      method: "GET",
+      url: `/rss/${urlId}/archive`,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("text/html");
+    expect(response.body).toContain("Daily issue");
+    expect(response.body).toContain("Daily issue body");
+    expect(response.body).toContain("Thu, 15 Oct 2026 08:00:00 GMT");
+    expect(response.body).toContain(
+      "/view/11111111-1111-4111-8111-111111111111",
+    );
+    expect(response.body).not.toContain("<script");
+    expect(response.body).toContain("1 retained email(s)");
+  });
+
+  it("accepts bare ids by default and rejects them in strict private mode", async () => {
+    const bare = await fastify.inject({ method: "GET", url: "/rss/thedaily/archive" });
+    expect(bare.statusCode).toBe(200);
+
+    const urlId = FeedIdentityGetFeedUrlId("thedaily");
+    FeedIdentityInit({
+      ignoreList: "",
+      overrides: {},
+      privateUrls: true,
+      privateUrlsStrict: true,
+      dataDir,
+    });
+    const strictBare = await fastify.inject({
+      method: "GET",
+      url: "/rss/thedaily/archive",
+    });
+    expect(strictBare.statusCode).toBe(404);
+    const strictTokenized = await fastify.inject({
+      method: "GET",
+      url: `/rss/${urlId}/archive`,
+    });
+    expect(strictTokenized.statusCode).toBe(200);
+  });
+
+  it("returns 404 for an invalid token without logging it", async () => {
+    const wrongToken = "0".repeat(24);
+    const response = await fastify.inject({
+      method: "GET",
+      url: `/rss/thedaily.${wrongToken}/archive`,
+    });
+    expect(response.statusCode).toBe(404);
+    expect(loggedText()).toContain("thedaily");
+    expect(loggedText()).not.toContain(wrongToken);
+  });
+
+  it("returns 404 for an unknown feed", async () => {
+    const response = await fastify.inject({
+      method: "GET",
+      url: "/rss/ghostfeed/archive",
+    });
+    expect(response.statusCode).toBe(404);
+  });
+
+  it("answers conditional requests and changes the ETag after an append", async () => {
+    const urlId = FeedIdentityGetFeedUrlId("thedaily");
+    const url = `/rss/${urlId}/archive`;
+    const first = await fastify.inject({ method: "GET", url });
+    expect(first.statusCode).toBe(200);
+    expect(first.headers.etag).toMatch(/^".+"$/);
+    expect(first.headers["last-modified"]).toBeTruthy();
+    expect(first.headers["cache-control"]).toBe("private, no-cache");
+
+    const notModified = await fastify.inject({
+      method: "GET",
+      url,
+      headers: { "if-none-match": first.headers.etag as string },
+    });
+    expect(notModified.statusCode).toBe(304);
+    expect(notModified.body).toBe("");
+
+    EmailItemsBatchSave([
+      makeItem({
+        id: "99999999-9999-4999-8999-999999999999",
+        messageId: "<daily-archive-new@example.com>",
+        subject: "Fresh archive issue",
+        body: "<p>Fresh archive body</p>",
+        dateReceived: new Date().toISOString(),
+        dateCreated: new Date().toISOString(),
+      }),
+    ]);
+    const changed = await fastify.inject({
+      method: "GET",
+      url,
+      headers: { "if-none-match": first.headers.etag as string },
+    });
+    expect(changed.statusCode).toBe(200);
+    expect(changed.headers.etag).not.toBe(first.headers.etag);
+    expect(changed.body).toContain("Fresh archive issue");
+  });
+
+  it("lists every retained email while the feed is capped", async () => {
+    EmailItemsBatchSave([
+      makeItem({
+        id: "22222222-2222-4222-8222-222222222222",
+        messageId: "<daily-2@example.com>",
+        subject: "Second daily issue",
+        body: "<p>Second body</p>",
+        dateReceived: "2026-10-16T08:00:00.000Z",
+        dateCreated: "2026-10-16T08:00:00.000Z",
+      }),
+      makeItem({
+        id: "33333333-3333-4333-8333-333333333333",
+        messageId: "<daily-3@example.com>",
+        subject: "Third daily issue",
+        body: "<p>Third body</p>",
+        dateReceived: "2026-10-17T08:00:00.000Z",
+        dateCreated: "2026-10-17T08:00:00.000Z",
+      }),
+    ]);
+    config.FEED_MAX_ITEMS = 1;
+
+    const feed = await fastify.inject({ method: "GET", url: "/rss/thedaily" });
+    expect(feed.statusCode).toBe(200);
+    expect((feed.body.match(/<item>/g) || [])).toHaveLength(1);
+    expect(feed.body).toContain("Third daily issue");
+    expect(feed.body).not.toContain("Second daily issue");
+
+    const archive = await fastify.inject({
+      method: "GET",
+      url: "/rss/thedaily/archive",
+    });
+    expect(archive.statusCode).toBe(200);
+    for (const subject of [
+      "Daily issue",
+      "Second daily issue",
+      "Third daily issue",
+    ]) {
+      expect(archive.body).toContain(subject);
+    }
+    expect(archive.body).toContain(
+      "3 retained email(s). The RSS feed serves the newest 1.",
+    );
   });
 });

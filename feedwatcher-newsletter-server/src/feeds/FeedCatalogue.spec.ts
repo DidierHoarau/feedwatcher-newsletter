@@ -8,8 +8,10 @@ function makeEntry(overrides: Partial<FeedListEntry> = {}): FeedListEntry {
     senderName: "The Daily",
     senderEmail: "news@example.com",
     itemCount: 2,
+    servedItemCount: 2,
     latestDate: "2026-10-16T08:00:00.000Z",
     feedUrl: "https://svc.example.com/rss/thedaily.abc123",
+    archiveUrl: "https://svc.example.com/rss/thedaily.abc123/archive",
     ...overrides,
   };
 }
@@ -34,8 +36,10 @@ describe("FeedCatalogueBuild", () => {
         "senderName",
         "senderEmail",
         "itemCount",
+        "servedItemCount",
         "latestDate",
         "feedUrl",
+        "archiveUrl",
       ].sort(),
     );
     expect(catalogue.feeds[0]).toEqual({
@@ -44,8 +48,10 @@ describe("FeedCatalogueBuild", () => {
       senderName: "The Daily",
       senderEmail: "news@example.com",
       itemCount: 2,
+      servedItemCount: 2,
       latestDate: "2026-10-16T08:00:00.000Z",
       feedUrl: "https://svc.example.com/rss/thedaily.abc123",
+      archiveUrl: "https://svc.example.com/rss/thedaily.abc123/archive",
     });
   });
 

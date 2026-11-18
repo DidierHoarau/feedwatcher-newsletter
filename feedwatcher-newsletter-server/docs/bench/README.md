@@ -23,6 +23,11 @@ per sender, dates within the retention window. `EmailsDataInit` is called once
 (after the change this builds the index), `FeedIdentityInit` runs with
 `privateUrls: false`, and the app is built against the fixture directory.
 
+The fixture has 20 emails per feed, below the default `FEED_MAX_ITEMS` cap of
+200, so the recorded feed numbers stay comparable after the bounded-feed-window
+change; the cap scales `/rss/<id>` cost with the served window rather than the
+retained journal.
+
 Endpoints measured: `/rss/` JSON, `/rss/` HTML, `/rss/opml`, the largest feed
 (`/rss/sender0`), one `/view/<itemId>` page, and one conditional
 `If-None-Match` request for `/rss/sender0` (the ETag of a priming request is

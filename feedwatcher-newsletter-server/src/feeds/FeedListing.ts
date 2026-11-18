@@ -17,6 +17,17 @@ export function FeedListingGetBaseUrl(
 
 export interface FeedListEntry extends FeedSummary {
   feedUrl: string;
+  archiveUrl: string;
+  servedItemCount: number;
+}
+
+// The feed is the bounded "recent" window: it serves at most FEED_MAX_ITEMS
+// emails, while retention and the archive keep every stored email.
+export function FeedListingServedItemCount(
+  maxItems: number,
+  itemCount: number,
+): number {
+  return maxItems > 0 ? Math.min(itemCount, maxItems) : itemCount;
 }
 
 export function FeedListingGetFeeds(
@@ -24,9 +35,17 @@ export function FeedListingGetFeeds(
   request: FastifyRequest,
 ): { feeds: FeedListEntry[]; baseUrl: string } {
   const baseUrl = FeedListingGetBaseUrl(config, request);
-  const feeds = EmailFeedsListAll().map((feed) => ({
-    ...feed,
-    feedUrl: `${baseUrl}/rss/${FeedIdentityGetFeedUrlId(feed.feedId)}`,
-  }));
+  const feeds = EmailFeedsListAll().map((feed) => {
+    const feedUrl = `${baseUrl}/rss/${FeedIdentityGetFeedUrlId(feed.feedId)}`;
+    return {
+      ...feed,
+      feedUrl,
+      archiveUrl: `${feedUrl}/archive`,
+      servedItemCount: FeedListingServedItemCount(
+        config.FEED_MAX_ITEMS,
+        feed.itemCount,
+      ),
+    };
+  });
   return { feeds, baseUrl };
 }
