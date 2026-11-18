@@ -1,0 +1,430 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`HtmlSanitizerSanitize newsletter corpus keeps the layout and presentation of the kessel fixture 1`] = `
+"
+
+
+
+
+Kessel Weekly
+
+
+
+<center>
+  <table width="100%" cellpadding="0" cellspacing="0" border="0">
+    <tr>
+      <td align="center" valign="top">
+        <table width="620" cellpadding="4" cellspacing="0" border="0" bgcolor="#ffffff" align="center" style="border:1px solid #d8d2c4;border-collapse:collapse">
+          <tr>
+            <td align="center" valign="middle" bgcolor="#5b3a29" style="padding:14px 10px;background-color:#5b3a29">
+              <center>
+                <font face="Times New Roman, serif" color="#f3e9d2" size="6"><b>Kessel Weekly</b></font>
+              </center>
+            </td>
+          </tr>
+          <tr>
+            <td align="left" valign="top" style="padding:16px;font-family:Times New Roman, serif;font-size:16px;line-height:24px;color:#2b2b2b">
+              <table width="100%" cellpadding="2" cellspacing="0" border="0">
+                <tr>
+                  <td width="50%" valign="top" style="padding:6px 10px 6px 0;border-right:1px dotted #c8bfae">
+                    <font face="Times New Roman, serif" color="#5b3a29" size="4"><b>A reduced column heading</b></font>
+                    <p style="margin:6px 0 0;font-size:15px;line-height:22px;color:#3a3a3a">
+                      Reduced column text written for the fixture only, with no real news.
+                    </p>
+                  </td>
+                  <td width="50%" valign="top" style="padding:6px 0 6px 10px">
+                    <font face="Georgia, serif" color="#2f5d3a" size="3">A second reduced heading</font>
+                    <p style="margin:6px 0 0;font-size:15px;line-height:22px;color:#3a3a3a">
+                      Another short paragraph, intentionally plain, so the safe styles stand out.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:14px 0 0">
+                <tr>
+                  <td align="center" valign="middle" bgcolor="#5b3a29" style="padding:12px;background-color:#5b3a29;border-radius:4px">
+                    <a href="https://example.com/kessel/read" style="color:#f3e9d2;font-family:Georgia, serif;font-size:15px;font-weight:bold;text-decoration:none" target="_blank" rel="noopener noreferrer nofollow">Read the reduced issue</a>
+                  </td>
+                </tr>
+              </table>
+              <div>
+                Hidden hostile container from the reduced legacy fixture.
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td align="center" valign="middle" style="padding:14px;border-top:1px solid #d8d2c4;font-family:Times New Roman, serif;font-size:12px;line-height:18px;color:#7a7264">
+              <center>
+                <font face="Times New Roman" color="#7a7264" size="2">
+                  Reduced fixture · fictional subscriber
+                </font>
+              </center>
+            </td>
+          </tr>
+        </table>
+        
+      </td>
+    </tr>
+  </table>
+</center>
+
+
+
+"
+`;
+
+exports[`HtmlSanitizerSanitize newsletter corpus keeps the layout and presentation of the morning-brew fixture 1`] = `
+"
+
+
+
+
+Morning Brew
+
+
+<center>
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f2f2f2">
+    <tr>
+      <td align="center" valign="top">
+        <table width="600" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" align="center" style="width:600px;max-width:100%">
+          <tr>
+            <td bgcolor="#0f2a4a" align="center" valign="middle" style="padding:20px 24px;background-color:#0f2a4a;color:#ffffff;font-family:Georgia, serif;font-size:22px;font-weight:bold">
+              <font face="Georgia, serif" color="#ffffff" size="5">Morning Brew</font>
+            </td>
+          </tr>
+          <tr>
+            <td align="center" valign="top" style="padding:0">
+              <img src="https://images.example.com/brew/hero.jpg" width="600" height="240" alt="Today's hero" style="width:600px;height:240px" />
+            </td>
+          </tr>
+          <tr>
+            <td align="left" valign="top" style="padding:28px 32px;font-family:Georgia, serif;font-size:17px;line-height:26px;color:#222222">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td align="left" style="font-family:Georgia, serif;font-size:22px;line-height:30px;color:#0f2a4a;font-weight:bold;padding:0 0 12px">
+                    Markets wrap, reduced
+                  </td>
+                </tr>
+                <tr>
+                  <td align="left" style="font-size:17px;line-height:26px;color:#333333;padding:0 0 16px">
+                    A short reduced paragraph describing the day's business news without any real data.
+                  </td>
+                </tr>
+                <tr>
+                  <td align="center" valign="middle" style="padding:8px 0 24px">
+                    <table cellpadding="0" cellspacing="0" border="0" align="center">
+                      <tr>
+                        <td bgcolor="#1f6feb" align="center" style="border-radius:6px;padding:12px 28px;background-color:#1f6feb">
+                          <a href="https://example.com/brew/read" style="color:#ffffff;font-family:Helvetica, Arial, sans-serif;font-size:15px;font-weight:bold;text-decoration:none;letter-spacing:0.5px" target="_blank" rel="noopener noreferrer nofollow">READ THE FULL STORY</a>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+                <tr>
+                  <td align="left" valign="top" style="border-top:1px solid #dddddd;padding:16px 0 0;font-family:Helvetica, Arial, sans-serif;font-size:13px;line-height:20px;color:#666666">
+                    <font face="Helvetica, Arial, sans-serif" color="#666666" size="2">
+                      Sponsored content in this reduced fixture is fictional.
+                    </font>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td bgcolor="#f7f7f7" align="center" valign="middle" style="padding:18px 24px">
+              <a href="https://example.com/brew/unsubscribe" style="color:#1f6feb;font-family:Helvetica, Arial, sans-serif;font-size:12px" target="_blank" rel="noopener noreferrer nofollow">Unsubscribe</a>
+              <font face="Helvetica" color="#999999" size="1"> · </font>
+              <a href="https://example.com/brew/preferences" style="color:#1f6feb;font-family:Helvetica, Arial, sans-serif;font-size:12px" target="_blank" rel="noopener noreferrer nofollow">Preferences</a>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</center>
+
+
+
+"
+`;
+
+exports[`HtmlSanitizerSanitize newsletter corpus keeps the layout and presentation of the scmp fixture 1`] = `
+"
+
+
+
+
+SCMP
+
+
+<table width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ececec">
+  <tr>
+    <td align="center" valign="top" style="padding:12px 0">
+      <table width="720" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" align="center">
+        <tr>
+          <td colspan="2" bgcolor="#1c1c1c" align="left" valign="middle" style="padding:14px 20px;color:#ffffff;font-family:Helvetica, Arial, sans-serif;font-size:20px;font-weight:bold">
+            <font face="Helvetica, Arial, sans-serif" color="#ffffff" size="5">SCMP Newsletter</font>
+          </td>
+        </tr>
+        <tr>
+          <td colspan="2" align="left" valign="top" style="padding:20px 20px 0;border-bottom:2px solid #b30000">
+            <table width="100%" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td width="60%" valign="top" style="padding:0 16px 16px 0;font-family:Helvetica, Arial, sans-serif;font-size:15px;line-height:23px;color:#222222">
+                  <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                    <tr>
+                      <td align="left" style="font-size:24px;line-height:30px;color:#111111;font-weight:bold;padding:0 0 10px">
+                        Reduced lead story headline
+                      </td>
+                    </tr>
+                    <tr>
+                      <td align="left" style="font-size:15px;line-height:23px;color:#444444;padding:0 0 12px">
+                        A reduced summary paragraph for the lead story, with no real names or figures.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td align="left" valign="top">
+                        <img src="https://media.example.com/scmp/lead.jpg" width="360" height="200" alt="Lead story" style="width:360px;height:200px;border:1px solid #dddddd" />
+                      </td>
+                    </tr>
+                  </table>
+                </td>
+                <td width="40%" valign="top" style="padding:0 0 16px;border-left:1px solid #dddddd;padding-left:16px">
+                  <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                    <tr>
+                      <td align="left" style="color:#b30000;font-family:Helvetica, Arial, sans-serif;font-size:13px;font-weight:bold;letter-spacing:1px;padding:0 0 8px">
+                        LATEST
+                      </td>
+                    </tr>
+                    <tr>
+                      <td align="left" valign="top" style="padding:0 0 12px;font-family:Helvetica, Arial, sans-serif;font-size:14px;line-height:20px;color:#333333">
+                        <a href="https://example.com/scmp/a" style="color:#1a4a8a;text-decoration:none" target="_blank" rel="noopener noreferrer nofollow">Reduced secondary headline A</a>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td align="left" valign="top" style="padding:0 0 12px;font-family:Helvetica, Arial, sans-serif;font-size:14px;line-height:20px;color:#333333">
+                        <a href="https://example.com/scmp/b" style="color:#1a4a8a;text-decoration:none" target="_blank" rel="noopener noreferrer nofollow">Reduced secondary headline B</a>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td align="left" valign="top" style="padding:8px 0 0;border-top:1px dotted #cccccc">
+                        <img src="https://media.example.com/scmp/side.jpg" width="200" height="120" alt="Side story" style="width:200px;height:120px" />
+                      </td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td colspan="2" align="center" valign="middle" style="padding:16px 20px;background-color:#f5f5f5;font-family:Helvetica, Arial, sans-serif;font-size:12px;color:#777777">
+            <center>
+              <font face="Helvetica" color="#777777" size="2">Reduced fixture · no real editorial content</font>
+            </center>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+
+
+
+"
+`;
+
+exports[`HtmlSanitizerSanitize newsletter corpus keeps the layout and presentation of the tldr fixture 1`] = `
+"
+
+
+
+
+TLDR
+
+
+
+
+<table width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f4f4f4">
+  <tr>
+    <td align="center" valign="top" style="padding:0">
+      <table width="600" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" align="center">
+        <tr>
+          <td align="center" valign="middle" style="padding:16px 0;border-bottom:1px solid #e5e5e5" bgcolor="#ffffff">
+            <img src="https://cdn.example.com/tldr/logo.png" alt="TLDR" width="120" height="32" style="width:120px;height:32px" />
+          </td>
+        </tr>
+        <tr>
+          <td align="left" valign="top" style="padding:24px 32px;font-family:Helvetica, Arial, sans-serif;font-size:16px;line-height:24px;color:#1a1a1a">
+            <table width="100%" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td width="48" valign="top" style="padding:0 12px 0 0">
+                  <font face="Helvetica, Arial, sans-serif" color="#2563eb" size="4"><b>01</b></font>
+                </td>
+                <td valign="top" style="font-size:16px;color:#1a1a1a">
+                  <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                    <tr>
+                      <td align="left" style="font-family:Helvetica, Arial, sans-serif;font-size:18px;font-weight:bold;color:#111111">
+                        A reduced headline for the first story
+                      </td>
+                    </tr>
+                    <tr>
+                      <td align="left" style="padding:8px 0 0;font-size:15px;line-height:22px;color:#444444">
+                        <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                          <tr>
+                            <td valign="top" style="font-size:15px;color:#444444">
+                              First paragraph of the reduced story body, kept short on purpose.
+                            </td>
+                          </tr>
+                          <tr>
+                            <td valign="top" style="padding:6px 0 0">
+                              <table cellpadding="0" cellspacing="0" border="0">
+                                <tr>
+                                  <td bgcolor="#f0f4ff" align="center" style="padding:8px 16px;border-radius:4px">
+                                    <a href="https://example.com/tldr/story-1" style="color:#2563eb;font-family:Helvetica, Arial, sans-serif;font-size:14px;text-decoration:none;font-weight:bold" target="_blank" rel="noopener noreferrer nofollow">Read more</a>
+                                  </td>
+                                </tr>
+                              </table>
+                            </td>
+                          </tr>
+                        </table>
+                      </td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+            </table>
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:20px 0 0">
+              <tr><td height="1" bgcolor="#eeeeee" style="font-size:0;line-height:0"> </td></tr>
+            </table>
+            <table width="100%" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td width="48" valign="top" style="padding:0 12px 0 0">
+                  <font face="Helvetica, Arial, sans-serif" color="#2563eb" size="4"><b>02</b></font>
+                </td>
+                <td valign="top" style="font-size:16px;color:#1a1a1a">
+                  <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                    <tr>
+                      <td align="left" style="font-family:Helvetica, Arial, sans-serif;font-size:18px;font-weight:bold;color:#111111">
+                        A reduced headline for the second story
+                      </td>
+                    </tr>
+                    <tr>
+                      <td align="left" style="padding:8px 0 0;font-size:15px;line-height:22px;color:#444444">
+                        <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                          <tr>
+                            <td valign="top" style="font-size:15px;color:#444444">
+                              Second paragraph, also reduced and anonymized.
+                            </td>
+                          </tr>
+                          <tr>
+                            <td valign="top" style="padding:6px 0 0" align="left">
+                              <a href="https://example.com/tldr/story-2" style="color:#2563eb;text-decoration:underline" target="_blank" rel="noopener noreferrer nofollow">Read more</a>
+                            </td>
+                          </tr>
+                        </table>
+                      </td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+            </table>
+            <table width="100%" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td align="center" valign="top" style="padding:24px 0 0;font-family:Helvetica, Arial, sans-serif;font-size:12px;color:#888888">
+                  <center>
+                    <font face="Helvetica" color="#888888" size="2">
+                      You received this reduced test newsletter because you subscribed.
+                    </font>
+                  </center>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+      
+    </td>
+  </tr>
+</table>
+
+
+"
+`;
+
+exports[`HtmlSanitizerSanitize newsletter corpus keeps the layout when remote images are blocked 1`] = `
+"
+
+
+
+
+Morning Brew
+
+
+<center>
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f2f2f2">
+    <tr>
+      <td align="center" valign="top">
+        <table width="600" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" align="center" style="width:600px;max-width:100%">
+          <tr>
+            <td bgcolor="#0f2a4a" align="center" valign="middle" style="padding:20px 24px;background-color:#0f2a4a;color:#ffffff;font-family:Georgia, serif;font-size:22px;font-weight:bold">
+              <font face="Georgia, serif" color="#ffffff" size="5">Morning Brew</font>
+            </td>
+          </tr>
+          <tr>
+            <td align="center" valign="top" style="padding:0">
+              <img width="600" height="240" alt="Today's hero" style="width:600px;height:240px" />
+            </td>
+          </tr>
+          <tr>
+            <td align="left" valign="top" style="padding:28px 32px;font-family:Georgia, serif;font-size:17px;line-height:26px;color:#222222">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td align="left" style="font-family:Georgia, serif;font-size:22px;line-height:30px;color:#0f2a4a;font-weight:bold;padding:0 0 12px">
+                    Markets wrap, reduced
+                  </td>
+                </tr>
+                <tr>
+                  <td align="left" style="font-size:17px;line-height:26px;color:#333333;padding:0 0 16px">
+                    A short reduced paragraph describing the day's business news without any real data.
+                  </td>
+                </tr>
+                <tr>
+                  <td align="center" valign="middle" style="padding:8px 0 24px">
+                    <table cellpadding="0" cellspacing="0" border="0" align="center">
+                      <tr>
+                        <td bgcolor="#1f6feb" align="center" style="border-radius:6px;padding:12px 28px;background-color:#1f6feb">
+                          <a href="https://example.com/brew/read" style="color:#ffffff;font-family:Helvetica, Arial, sans-serif;font-size:15px;font-weight:bold;text-decoration:none;letter-spacing:0.5px" target="_blank" rel="noopener noreferrer nofollow">READ THE FULL STORY</a>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+                <tr>
+                  <td align="left" valign="top" style="border-top:1px solid #dddddd;padding:16px 0 0;font-family:Helvetica, Arial, sans-serif;font-size:13px;line-height:20px;color:#666666">
+                    <font face="Helvetica, Arial, sans-serif" color="#666666" size="2">
+                      Sponsored content in this reduced fixture is fictional.
+                    </font>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td bgcolor="#f7f7f7" align="center" valign="middle" style="padding:18px 24px">
+              <a href="https://example.com/brew/unsubscribe" style="color:#1f6feb;font-family:Helvetica, Arial, sans-serif;font-size:12px" target="_blank" rel="noopener noreferrer nofollow">Unsubscribe</a>
+              <font face="Helvetica" color="#999999" size="1"> · </font>
+              <a href="https://example.com/brew/preferences" style="color:#1f6feb;font-family:Helvetica, Arial, sans-serif;font-size:12px" target="_blank" rel="noopener noreferrer nofollow">Preferences</a>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</center>
+
+
+
+"
+`;

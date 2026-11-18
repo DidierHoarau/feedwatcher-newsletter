@@ -1,0 +1,78 @@
+<!-- Reduced, anonymized reconstruction of a legacy Kessel-family newsletter
+     body. Structural signatures: <font>/<center>-heavy layout with inline
+     styles, including hostile declarations that must be dropped by the
+     allowlist (position, overflow, background:url(), expression(),
+     -moz-binding, behavior, a custom property and calc()), plus a tracking
+     pixel. Safe inline typography and colors are mixed in to prove they
+     survive. No real recipient, token or personal data. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Kessel Weekly</title>
+<style>
+  body { background: url(https://evil.example.com/track.png); }
+  .banner { position: fixed; }
+</style>
+</head>
+<body bgcolor="#fbfbf7" style="margin:0;padding:0;background:#fbfbf7">
+<center>
+  <table width="100%" cellpadding="0" cellspacing="0" border="0">
+    <tr>
+      <td align="center" valign="top">
+        <table width="620" cellpadding="4" cellspacing="0" border="0" bgcolor="#ffffff" align="center" style="border:1px solid #d8d2c4;border-collapse:collapse">
+          <tr>
+            <td align="center" valign="middle" bgcolor="#5b3a29" style="padding:14px 10px;background-color:#5b3a29;position:absolute;top:0;left:0;overflow:hidden;z-index:999">
+              <center>
+                <font face="Times New Roman, serif" color="#f3e9d2" size="6"><b>Kessel Weekly</b></font>
+              </center>
+            </td>
+          </tr>
+          <tr>
+            <td align="left" valign="top" style="padding:16px;font-family:Times New Roman, serif;font-size:16px;line-height:24px;color:#2b2b2b;background:url(https://evil.example.com/bg.png);width:calc(100% - 32px)">
+              <table width="100%" cellpadding="2" cellspacing="0" border="0">
+                <tr>
+                  <td width="50%" valign="top" style="padding:6px 10px 6px 0;border-right:1px dotted #c8bfae">
+                    <font face="Times New Roman, serif" color="#5b3a29" size="4"><b>A reduced column heading</b></font>
+                    <p style="margin:6px 0 0;font-size:15px;line-height:22px;color:#3a3a3a">
+                      Reduced column text written for the fixture only, with no real news.
+                    </p>
+                  </td>
+                  <td width="50%" valign="top" style="padding:6px 0 6px 10px">
+                    <font face="Georgia, serif" color="#2f5d3a" size="3">A second reduced heading</font>
+                    <p style="margin:6px 0 0;font-size:15px;line-height:22px;color:#3a3a3a">
+                      Another short paragraph, intentionally plain, so the safe styles stand out.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:14px 0 0">
+                <tr>
+                  <td align="center" valign="middle" bgcolor="#5b3a29" style="padding:12px;background-color:#5b3a29;border-radius:4px">
+                    <a href="https://example.com/kessel/read" style="color:#f3e9d2;font-family:Georgia, serif;font-size:15px;font-weight:bold;text-decoration:none">Read the reduced issue</a>
+                  </td>
+                </tr>
+              </table>
+              <div style="position:absolute;display:none;visibility:hidden;float:left;transform:translateX(10px);filter:blur(2px);opacity:0;content:'x';-moz-binding:url(https://evil.example.com/bind.xml);behavior:url(https://evil.example.com/behavior.htc);background-image:url(https://evil.example.com/overlay.png);list-style-image:url(https://evil.example.com/bullet.png);--brand-gap:12px;color:expression(alert(1));width:calc(100% - 32px)">
+                Hidden hostile container from the reduced legacy fixture.
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td align="center" valign="middle" style="padding:14px;border-top:1px solid #d8d2c4;font-family:Times New Roman, serif;font-size:12px;line-height:18px;color:#7a7264">
+              <center>
+                <font face="Times New Roman" color="#7a7264" size="2">
+                  Reduced fixture &middot; fictional subscriber
+                </font>
+              </center>
+            </td>
+          </tr>
+        </table>
+        <img src="https://tracker.example.com/kessel/pixel.gif" width="1" height="1" alt="">
+      </td>
+    </tr>
+  </table>
+</center>
+<script>document.write("<img src='https://evil.example.com/beacon'>");</script>
+</body>
+</html>

@@ -1073,6 +1073,166 @@ describe("journal independence at the route level", () => {
   });
 });
 
+describe("newsletter layout fidelity", () => {
+  let isolatedDir: string;
+  const LAYOUT_ID = "88888888-8888-4888-8888-888888888888";
+  const LAYOUT_2_ID = "99999999-9999-4999-8999-999999999999";
+  const UNKNOWN_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const STYLE_BODY =
+    '<table width="600" align="center" bgcolor="#ffffff" cellpadding="8" cellspacing="0" border="0" style="border-collapse:collapse">' +
+    '<tr><td valign="top" style="color:#123456;font-family:Arial, sans-serif;font-size:14px;padding:8px;position:absolute;background:url(https://evil.example/bg.png)">' +
+    '<font face="Arial" color="#123456" size="3">Style-heavy body</font>' +
+    '<script>alert("xss")</script>' +
+    '<img src="https://tracker.example/pixel" width="1" height="1" onerror="alert(1)">' +
+    "</td></tr></table>";
+
+  beforeEach(() => {
+    isolatedDir = fs.mkdtempSync(path.join(os.tmpdir(), "appbuilder-layout-"));
+    EmailsDataInit(7, isolatedDir);
+    FeedIdentityInit({
+      ignoreList: "",
+      overrides: {},
+      privateUrls: true,
+      dataDir: isolatedDir,
+    });
+    EmailItemsBatchSave([
+      makeItem({
+        id: LAYOUT_ID,
+        messageId: "<layout-1@example.com>",
+        senderName: "Style Gazette",
+        senderEmail: "style@example.com",
+        subject: "Layout issue 1",
+        body: STYLE_BODY,
+        dateReceived: "2026-10-15T08:00:00.000Z",
+        dateCreated: "2026-10-15T08:00:00.000Z",
+      }),
+      makeItem({
+        id: LAYOUT_2_ID,
+        messageId: "<layout-2@example.com>",
+        senderName: "Style Gazette",
+        senderEmail: "style@example.com",
+        subject: "Layout issue 2",
+        body: STYLE_BODY,
+        dateReceived: "2026-10-16T08:00:00.000Z",
+        dateCreated: "2026-10-16T08:00:00.000Z",
+      }),
+      makeItem({
+        id: UNKNOWN_ID,
+        messageId: "<unknown-1@example.com>",
+        senderName: "Unknown",
+        senderEmail: "unknown@unknown.com",
+        subject: "Unknown sender issue",
+        body: "<p>Unknown</p>",
+      }),
+    ]);
+    FeedIdentityEnsureTokens(["stylegazette"]);
+  });
+
+  afterEach(() => {
+    EmailsDataInit(7, dataDir);
+    initFeedIdentity();
+  });
+
+  it("keeps layout attributes and inline styles in the feed and the view", async () => {
+    const fastify = build(makeConfig({ DATA_DIR: isolatedDir }));
+    const urlId = FeedIdentityGetFeedUrlId("stylegazette");
+    const feed = await fastify.inject({
+      method: "GET",
+      url: `/rss/${urlId}`,
+    });
+    const view = await fastify.inject({
+      method: "GET",
+      url: `/view/${LAYOUT_ID}`,
+    });
+
+    for (const response of [feed, view]) {
+      expect(response.statusCode).toBe(200);
+      expect(response.body).toContain('width="600"');
+      expect(response.body).toContain('align="center"');
+      expect(response.body).toContain('bgcolor="#ffffff"');
+      expect(response.body).toContain('cellpadding="8"');
+      expect(response.body).toContain("color:#123456");
+      expect(response.body).toContain("font-family:Arial, sans-serif");
+      expect(response.body).toContain("<font");
+      for (const pattern of [
+        /<script/i,
+        /\son[a-z]+\s*=/i,
+        /url\s*\(/i,
+        /expression\s*\(/i,
+        /position\s*:/i,
+      ]) {
+        expect(response.body).not.toMatch(pattern);
+      }
+      expect(response.body).not.toContain("evil.example");
+      expect(response.body).not.toContain("tracker.example");
+    }
+  });
+
+  it("links the feed and the newer item from an older item", async () => {
+    const fastify = build(makeConfig({ DATA_DIR: isolatedDir }));
+    const view = await fastify.inject({
+      method: "GET",
+      url: `/view/${LAYOUT_ID}`,
+    });
+    expect(view.statusCode).toBe(200);
+    expect(view.body).toContain(
+      `<a class="nav-newer" href="/view/${LAYOUT_2_ID}">&larr; Newer: Layout issue 2</a>`,
+    );
+    expect(view.body).toContain(
+      `<a class="nav-feed" href="http://localhost:80/rss/${FeedIdentityGetFeedUrlId(
+        "stylegazette",
+      )}">Feed: Style Gazette</a>`,
+    );
+    expect(view.body).not.toContain('class="nav-older"');
+  });
+
+  it("links the older item from the newest item", async () => {
+    const fastify = build(makeConfig({ DATA_DIR: isolatedDir }));
+    const view = await fastify.inject({
+      method: "GET",
+      url: `/view/${LAYOUT_2_ID}`,
+    });
+    expect(view.statusCode).toBe(200);
+    expect(view.body).toContain(
+      `<a class="nav-older" href="/view/${LAYOUT_ID}">Older: Layout issue 1 &rarr;</a>`,
+    );
+    expect(view.body).not.toContain('class="nav-newer"');
+  });
+
+  it("renders an item from an unknown sender without navigation", async () => {
+    const fastify = build(makeConfig({ DATA_DIR: isolatedDir }));
+    const view = await fastify.inject({
+      method: "GET",
+      url: `/view/${UNKNOWN_ID}`,
+    });
+    expect(view.statusCode).toBe(200);
+    expect(view.body).toContain("Unknown sender issue");
+    expect(view.body).not.toContain('class="email-nav"');
+    expect(view.body).not.toContain('class="nav-feed"');
+    expect(view.body).not.toContain('class="nav-newer"');
+    expect(view.body).not.toContain('class="nav-older"');
+    expect(view.body).toContain('<a class="back" href="/rss/">&larr; All feeds</a>');
+  });
+
+  it("keeps the view CSP identical to the index and ships no script", async () => {
+    const fastify = build(makeConfig({ DATA_DIR: isolatedDir }));
+    const index = await fastify.inject({
+      method: "GET",
+      url: "/rss/",
+      headers: { accept: "text/html" },
+    });
+    const view = await fastify.inject({
+      method: "GET",
+      url: `/view/${LAYOUT_ID}`,
+    });
+    expect(view.statusCode).toBe(200);
+    expect(view.headers["content-security-policy"]).toBe(
+      index.headers["content-security-policy"],
+    );
+    expect(view.body).not.toContain("<script");
+  });
+});
+
 describe("security headers", () => {
   function scriptHash(body: string): string {
     const match = body.match(/<script>([\s\S]*?)<\/script>/);

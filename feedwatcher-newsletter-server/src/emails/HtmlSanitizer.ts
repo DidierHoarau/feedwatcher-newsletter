@@ -2,27 +2,143 @@ import sanitizeHtml from "sanitize-html";
 
 const SUMMARY_MAX_LENGTH = 500;
 
+// Inline styles are allowlisted for presentation only: `<style>` blocks and
+// remote CSS stay banned, no value may load a URL or execute code. Each regex
+// is anchored because sanitize-html matches declarations with RegExp.test.
+const LENGTH = String.raw`(?:0|-?[0-9]+(?:\.[0-9]+)?(?:px|pt|em|rem|%))`;
+const COLOR = String.raw`(?:#[0-9a-f]{3,8}|rgba?\([^()]*\)|hsla?\([^()]*\)|(?!url|expression|image-set|var|env|attr)[a-z]{3,20})`;
+const colorRe = new RegExp(`^${COLOR}$`, "i");
+const sizeRe = new RegExp(`^(?:auto|${LENGTH})$`, "i");
+const boxRe = new RegExp(
+  `^(?:auto|${LENGTH})(?:\\s+(?:auto|${LENGTH})){0,3}$`,
+  "i",
+);
+const borderRe = new RegExp(
+  `^(?:0|none|[0-9]+(?:\\.[0-9]+)?(?:px|pt|em|rem)?\\s+` +
+    `(?:none|solid|dashed|dotted|double|groove|ridge|inset|outset)(?:\\s+${COLOR})?)$`,
+  "i",
+);
+const borderWidthRe = new RegExp(
+  `^(?:thin|medium|thick|${LENGTH})(?:\\s+(?:thin|medium|thick|${LENGTH})){0,3}$`,
+  "i",
+);
+const borderStyleRe = new RegExp(
+  `^(?:none|hidden|dotted|dashed|solid|double|groove|ridge|inset|outset)` +
+    `(?:\\s+(?:none|hidden|dotted|dashed|solid|double|groove|ridge|inset|outset)){0,3}$`,
+  "i",
+);
+const borderColorRe = new RegExp(`^${COLOR}(?:\\s+${COLOR}){0,3}$`, "i");
+
+// Allowed values are presentation-only: a table/cell layout, typography,
+// colors, borders, spacing, sizing and alignment. Anything unknown (including
+// position, overflow, display, float, transforms, custom properties and
+// url()/expression()/var()/calc()) is dropped by this allowlist, never by a
+// blacklist.
+const allowedStyles: sanitizeHtml.IOptions["allowedStyles"] = {
+  "*": {
+    color: [colorRe],
+    "background-color": [colorRe],
+    background: [colorRe],
+    "font-family": [/^[a-z0-9][a-z0-9 ,'"_-]*$/i],
+    "font-size": [
+      new RegExp(
+        `^(?:${LENGTH}|xx-small|x-small|small|medium|large|x-large|xx-large|smaller|larger)$`,
+        "i",
+      ),
+    ],
+    "font-weight": [/^(?:normal|bold|bolder|lighter|[1-9]00)$/i],
+    "font-style": [/^(?:normal|italic|oblique)$/i],
+    "line-height": [
+      /^(?:normal|[0-9]+(?:\.[0-9]+)?(?:px|pt|em|rem|%)?)$/i,
+    ],
+    "letter-spacing": [new RegExp(`^(?:normal|${LENGTH})$`, "i")],
+    "text-align": [/^(?:left|right|center|justify|start|end)$/i],
+    "vertical-align": [
+      new RegExp(
+        `^(?:baseline|sub|super|text-top|text-bottom|middle|top|bottom|${LENGTH})$`,
+        "i",
+      ),
+    ],
+    "text-transform": [/^(?:none|capitalize|uppercase|lowercase)$/i],
+    "text-decoration": [/^(?:none|underline|overline|line-through)$/i],
+    "white-space": [/^(?:normal|nowrap|pre|pre-wrap|pre-line)$/i],
+    padding: [boxRe],
+    margin: [boxRe],
+    "padding-top": [new RegExp(`^${LENGTH}$`, "i")],
+    "padding-right": [new RegExp(`^${LENGTH}$`, "i")],
+    "padding-bottom": [new RegExp(`^${LENGTH}$`, "i")],
+    "padding-left": [new RegExp(`^${LENGTH}$`, "i")],
+    "margin-top": [sizeRe],
+    "margin-right": [sizeRe],
+    "margin-bottom": [sizeRe],
+    "margin-left": [sizeRe],
+    width: [sizeRe],
+    "max-width": [sizeRe],
+    height: [sizeRe],
+    border: [borderRe],
+    "border-top": [borderRe],
+    "border-right": [borderRe],
+    "border-bottom": [borderRe],
+    "border-left": [borderRe],
+    "border-width": [borderWidthRe],
+    "border-style": [borderStyleRe],
+    "border-color": [borderColorRe],
+    "border-collapse": [/^(?:collapse|separate)$/i],
+    "border-spacing": [new RegExp(`^${LENGTH}(?:\\s+${LENGTH})?$`, "i")],
+    "border-radius": [
+      new RegExp(`^${LENGTH}(?:\\s+${LENGTH}){0,3}$`, "i"),
+    ],
+  },
+};
+
 function buildSanitizeOptions(
   stripTrackingPixels: boolean,
   blockRemoteImages: boolean,
 ): sanitizeHtml.IOptions {
   return {
-    // img is not in the sanitize-html defaults but newsletter bodies need it
-    allowedTags: sanitizeHtml.defaults.allowedTags.concat(["img"]),
+    // img, center and font are not in the sanitize-html defaults but
+    // newsletter bodies need them for their legacy table layout.
+    allowedTags: sanitizeHtml.defaults.allowedTags.concat([
+      "img",
+      "center",
+      "font",
+    ]),
     allowedSchemes: ["http", "https", "mailto"],
     allowedAttributes: {
       ...sanitizeHtml.defaults.allowedAttributes,
+      "*": ["style", "align", "valign"],
+      table: [
+        "width",
+        "height",
+        "align",
+        "valign",
+        "bgcolor",
+        "border",
+        "cellpadding",
+        "cellspacing",
+      ],
+      td: ["width", "height", "align", "valign", "bgcolor", "colspan", "rowspan"],
+      th: [
+        "width",
+        "height",
+        "align",
+        "valign",
+        "bgcolor",
+        "colspan",
+        "rowspan",
+        "scope",
+      ],
+      tr: ["width", "height", "align", "valign", "bgcolor"],
+      caption: ["align", "valign"],
+      col: ["width", "span", "align", "valign"],
+      colgroup: ["width", "span", "align", "valign"],
+      font: ["face", "color", "size"],
       img: ["src", "alt", "title", "width", "height", "style"],
-      a: ["href", "name", "target", "title"],
+      // rel must be allowed for the forced noopener/noreferrer/nofollow
+      // transform below to survive attribute filtering
+      a: ["href", "name", "target", "title", "rel"],
     },
-    // style is kept on images only for width/height, so tracking pixels can be
-    // detected below; everything else is stripped
-    allowedStyles: {
-      img: {
-        width: [/^[0-9.]+(%|px)?$/],
-        height: [/^[0-9.]+(%|px)?$/],
-      },
-    },
+    allowedStyles,
     allowProtocolRelative: false,
     transformTags: {
       a: sanitizeHtml.simpleTransform("a", { target: "_blank", rel: "noopener noreferrer nofollow" }),
@@ -92,9 +208,11 @@ function sizeFromStyle(style: string | undefined, property: string): number | un
 }
 
 // Strip scripts, event handlers, dangerous URLs and tracking pixels while
-// keeping links, images and the regular newsletter layout tags. Tracking-pixel
-// stripping can be disabled per call (EMAIL_STRIP_TRACKING_PIXELS); remote
-// image blocking is opt-in (EMAIL_BLOCK_REMOTE_IMAGES).
+// keeping links, images, the regular newsletter layout tags, table/cell layout
+// attributes and presentation-only inline styles. `<style>` blocks and remote
+// CSS stay banned. Tracking-pixel stripping can be disabled per call
+// (EMAIL_STRIP_TRACKING_PIXELS); remote image blocking is opt-in
+// (EMAIL_BLOCK_REMOTE_IMAGES).
 export function HtmlSanitizerSanitize(
   html: string,
   stripTrackingPixels = true,

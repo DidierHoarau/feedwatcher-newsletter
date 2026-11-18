@@ -66,6 +66,25 @@ describe("SanitizedBodyCacheGet", () => {
     expect(SanitizedBodyCacheStats().entries).toBe(2);
   });
 
+  it("returns the layout-preserving body produced by the current policy", () => {
+    const item = makeItem({
+      body:
+        '<table width="600" cellpadding="4" bgcolor="#ffffff" align="center">' +
+        '<tr><td valign="top" style="color:#123456;font-family:Arial, sans-serif;font-size:14px">' +
+        "Hello</td></tr></table>",
+    });
+    const entry = SanitizedBodyCacheGet(item);
+    expect(entry.html).toContain('width="600"');
+    expect(entry.html).toContain('cellpadding="4"');
+    expect(entry.html).toContain('bgcolor="#ffffff"');
+    expect(entry.html).toContain('align="center"');
+    expect(entry.html).toContain("color:#123456");
+    expect(entry.html).toContain("font-family:Arial, sans-serif");
+    expect(entry.summary).toBe("Hello");
+    // A cached hit serves exactly the same policy output.
+    expect(SanitizedBodyCacheGet(item)).toBe(entry);
+  });
+
   it("serves a re-sanitized body for a re-saved message with a new item id", () => {
     const original = SanitizedBodyCacheGet(
       makeItem({ body: "<p>Sensitive</p>" }),
