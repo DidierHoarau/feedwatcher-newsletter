@@ -9,7 +9,7 @@ import type { EmailItem } from "./EmailFetcher";
 export const SANITIZED_BODY_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 
 // Bump whenever the sanitizer options change so stale entries are never served.
-const CACHE_KEY_VERSION = 2;
+const CACHE_KEY_VERSION = 3;
 
 export interface SanitizedBody {
   html: string;

@@ -165,6 +165,184 @@ describe("HtmlSanitizerSanitize remote image blocking", () => {
   });
 });
 
+describe("HtmlSanitizerSanitize newsletter layout attributes", () => {
+  it("keeps table, row and cell layout attributes", () => {
+    const out = HtmlSanitizerSanitize(
+      '<table width="600" height="400" align="center" valign="top" bgcolor="#ffffff" border="0" cellpadding="8" cellspacing="0">' +
+        '<caption align="bottom" valign="top">c</caption>' +
+        '<colgroup width="200" span="2" align="left" valign="top"><col width="100" span="1" align="right" valign="bottom"></colgroup>' +
+        '<tr width="600" height="20" align="left" valign="middle" bgcolor="#eeeeee">' +
+        '<th width="300" height="20" align="left" valign="top" bgcolor="#dddddd" colspan="2" rowspan="1" scope="col">h</th>' +
+        '<td width="100" height="20" align="right" valign="bottom" bgcolor="#cccccc" colspan="1" rowspan="2">d</td>' +
+        "</tr></table>",
+    );
+    for (const attribute of [
+      'width="600"',
+      'height="400"',
+      'align="center"',
+      'valign="top"',
+      'bgcolor="#ffffff"',
+      'cellpadding="8"',
+      'cellspacing="0"',
+      'colspan="2"',
+      'rowspan="2"',
+      'scope="col"',
+      'span="2"',
+    ]) {
+      expect(out).toContain(attribute);
+    }
+  });
+
+  it("keeps presentational center and font tags", () => {
+    const out = HtmlSanitizerSanitize(
+      '<center><font face="Arial, sans-serif" color="#123456" size="4">text</font></center>',
+    );
+    expect(out).toBe(
+      '<center><font face="Arial, sans-serif" color="#123456" size="4">text</font></center>',
+    );
+  });
+
+  it("keeps allowlisted inline style categories", () => {
+    const out = HtmlSanitizerSanitize(
+      '<td style="color:#123456;background-color:#ffffff;background:#eeeeee;' +
+        "font-family:Arial, sans-serif;font-size:14px;font-weight:bold;font-style:italic;" +
+        "line-height:1.5;letter-spacing:1px;text-transform:uppercase;text-decoration:underline;white-space:nowrap;" +
+        "text-align:center;vertical-align:middle;" +
+        "padding:8px 12px;padding-top:4px;margin:0 auto;margin-left:10px;" +
+        'width:600px;max-width:100%;height:auto;' +
+        "border:1px solid #cccccc;border-top:2px dashed #ff0000;border-width:1px 2px;" +
+        "border-style:solid dashed;border-color:#ffffff #000000;" +
+        'border-collapse:collapse;border-spacing:0 4px;border-radius:4px">x</td>',
+    );
+    for (const declaration of [
+      "color:#123456",
+      "background-color:#ffffff",
+      "background:#eeeeee",
+      "font-family:Arial, sans-serif",
+      "font-size:14px",
+      "font-weight:bold",
+      "font-style:italic",
+      "line-height:1.5",
+      "letter-spacing:1px",
+      "text-transform:uppercase",
+      "text-decoration:underline",
+      "white-space:nowrap",
+      "text-align:center",
+      "vertical-align:middle",
+      "padding:8px 12px",
+      "padding-top:4px",
+      "margin:0 auto",
+      "margin-left:10px",
+      "width:600px",
+      "max-width:100%",
+      "height:auto",
+      "border:1px solid #cccccc",
+      "border-top:2px dashed #ff0000",
+      "border-width:1px 2px",
+      "border-style:solid dashed",
+      "border-color:#ffffff #000000",
+      "border-collapse:collapse",
+      "border-spacing:0 4px",
+      "border-radius:4px",
+    ]) {
+      expect(out).toContain(declaration);
+    }
+  });
+
+  it("keeps !important on an allowlisted property", () => {
+    const out = HtmlSanitizerSanitize(
+      '<p style="color:#123456 !important;position:absolute !important">x</p>',
+    );
+    expect(out).toContain("color:#123456 !important");
+    expect(out).not.toContain("position");
+  });
+
+  it("drops hostile or unknown inline declarations", () => {
+    const out = HtmlSanitizerSanitize(
+      '<div style="position:absolute;overflow:hidden;top:0;left:0;z-index:9;' +
+        "display:block;float:left;transform:scale(1);filter:blur(1px);opacity:0;content:\\'x\\';" +
+        "background-image:url(https://evil.example/x.png);" +
+        "background:url(https://evil.example/y.png);" +
+        "list-style-image:url(https://evil.example/z.png);" +
+        "color:expression(alert(1));behavior:url(https://evil.example/b.htc);" +
+        "-moz-binding:url(https://evil.example/bind.xml);--custom:1;" +
+        "color:var(--x);width:calc(100% - 10px);height:env(safe-area-inset-top);" +
+        'background:u\\72l(https://evil.example/escaped.png);color:#123456">x</div>',
+    );
+    expect(out).not.toMatch(
+      /position|overflow|top:|left:|z-index|display|float:|transform|filter:|opacity|content:|url\s*\(|expression|behavior|moz-binding|--custom|var\(|calc\(|env\(/i,
+    );
+    expect(out).toContain("color:#123456");
+  });
+
+  it("removes style blocks, links and active embedding", () => {
+    const out = HtmlSanitizerSanitize(
+      '<style>body { background: url(https://evil.example/bg.png); }</style>' +
+        '<link rel="stylesheet" href="https://evil.example/x.css">' +
+        '<iframe src="https://evil.example"></iframe>' +
+        '<object data="https://evil.example"></object>' +
+        '<form action="https://evil.example"><input name="q"></form>' +
+        "<p>kept</p>",
+    );
+    expect(out).toBe("<p>kept</p>");
+  });
+
+  it("removes background and srcset attributes while keeping images", () => {
+    const out = HtmlSanitizerSanitize(
+      '<table background="https://tracker.example/bg"><tr>' +
+        '<td background="https://tracker.example/cell">x</td></tr></table>' +
+        '<img src="https://cdn.example/photo.jpg" srcset="https://cdn.example/2x.jpg 2x" alt="p" width="600" height="400">',
+    );
+    expect(out).not.toContain("tracker.example");
+    expect(out).not.toContain("srcset");
+    expect(out).toContain('src="https://cdn.example/photo.jpg"');
+    expect(out).toContain('width="600"');
+    expect(out).toContain('height="400"');
+  });
+
+  it("keeps the tracking-pixel detection with inline styles allowed", () => {
+    for (const html of [
+      '<img src="https://tracker.example/p" width="1" height="1">',
+      '<img src="https://tracker.example/p" style="width:1px;height:auto">',
+      '<img src="https://tracker.example/p" style="width:1px;height:1px">',
+    ]) {
+      expect(HtmlSanitizerSanitize(html)).not.toContain("<img");
+    }
+    const normal = HtmlSanitizerSanitize(
+      '<img src="https://cdn.example/hero.jpg" width="600" height="400" style="width:600px;height:auto">',
+    );
+    expect(normal).toContain('width="600"');
+    expect(normal).toContain('style="width:600px;height:auto"');
+  });
+});
+
+describe("HtmlSanitizerSanitize links", () => {
+  it("forces target and rel on links", () => {
+    const out = HtmlSanitizerSanitize('<a href="https://example.com">x</a>');
+    expect(out).toContain('rel="noopener noreferrer nofollow"');
+    expect(out).toContain('target="_blank"');
+  });
+
+  it("replaces an attacker-supplied rel", () => {
+    const out = HtmlSanitizerSanitize(
+      '<a href="https://example.com" rel="opener">x</a>',
+    );
+    expect(out).toContain('rel="noopener noreferrer nofollow"');
+    expect(out).not.toMatch(/rel="[^"]*opener"/);
+  });
+
+  it("still drops dangerous and protocol-relative URLs", () => {
+    for (const href of [
+      "javascript:alert(1)",
+      "data:text/html,<script>alert(1)</script>",
+      "//evil.example/x",
+    ]) {
+      const out = HtmlSanitizerSanitize(`<a href="${href}">x</a>`);
+      expect(out).not.toContain("href=");
+    }
+  });
+});
+
 describe("HtmlSanitizerGetTextSummary", () => {
   it("extracts plain text from HTML", () => {
     expect(HtmlSanitizerGetTextSummary("<p>Hello <b>world</b></p>")).toBe(

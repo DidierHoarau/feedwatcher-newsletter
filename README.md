@@ -8,7 +8,7 @@ This project is a server-only companion to FeedWatcher. It has no UI and require
 
 One RSS feed is generated per unique sender name. Each feed's items are the email bodies (HTML preferred, plain text fallback) from that sender, ordered by date received.
 
-Email bodies are sanitized when served (scripts, event handlers, dangerous URLs and tracking pixels are stripped), each item links to a readable web view of the email, and feeds advertise near-real-time ingestion via IMAP IDLE with the cron schedule as fallback. Feed URLs can carry a per-feed token, senders can be ignored or renamed via configuration, and all feeds are discoverable through the versioned JSON catalogue (`/api/feeds`), advertised for reader autodiscovery on the index page, and importable anywhere through OPML export. Tokenized URLs only obfuscate feed addresses; the service has no authentication by default — see [Security and privacy](#security-and-privacy).
+Email bodies are sanitized when served (scripts, event handlers, dangerous URLs and tracking pixels are stripped while the sender's presentation — table layout, safe inline styles, typography and colors — is kept), each item links to a readable web view of the email, and feeds advertise near-real-time ingestion via IMAP IDLE with the cron schedule as fallback. Feed URLs can carry a per-feed token, senders can be ignored or renamed via configuration, and all feeds are discoverable through the versioned JSON catalogue (`/api/feeds`), advertised for reader autodiscovery on the index page, and importable anywhere through OPML export. Tokenized URLs only obfuscate feed addresses; the service has no authentication by default — see [Security and privacy](#security-and-privacy).
 
 # Deployment
 
@@ -165,6 +165,28 @@ IMAP connections verify the server certificate by default (see [IMAP](#imap)). H
 
 By default, newsletter bodies keep their remote images, so opening a feed item or its `/view/:emailId` page makes the reader's browser contact each sender-hosted image and leaks the reader's IP address and timing to the sender. `EMAIL_STRIP_TRACKING_PIXELS` only removes images that declare a size ≤ 1 pixel; undeclared tracking pixels and ordinary images still load. Set `EMAIL_BLOCK_REMOTE_IMAGES=true` to remove every remote `http`/`https` image source from both the RSS `content:encoded` body and the `/view` page, keeping `alt`/`title` and the layout attributes so the structure survives; nothing is proxied and no external image is fetched by the server. The trade-off is that images are not displayed while the option is enabled. The placeholder needs no CSP change, so the existing security headers and origins stay the same.
 
+## Newsletter HTML rendering policy
+
+Newsletter bodies are sanitized with an allowlist so an item opened from any feed (FeedWatcher or any RSS reader) keeps the sender's layout while active content stays impossible.
+
+**Preserved** (presentation only):
+
+- Layout table attributes: `width`, `height`, `align`, `valign`, `bgcolor`, `border`, `cellpadding`, `cellspacing` on `table`; `width`, `height`, `align`, `valign`, `bgcolor`, `colspan`, `rowspan` on `td`; the same plus `scope` on `th`; row/caption/column attributes on `tr`, `caption`, `col` and `colgroup`.
+- Presentational `<center>` and `<font face color size>`.
+- Inline `style` on any allowed element, restricted to an allowlisted set of properties: typography (`font-family`, `font-size`, `font-weight`, `font-style`, `line-height`, `letter-spacing`, `text-transform`, `text-decoration`, `white-space`), color and background (`color`, `background-color`, `background` as a solid color only), borders (`border` and longhands, `border-collapse`, `border-spacing`, `border-radius`), spacing (`padding`, `margin` and their longhands), sizing (`width`, `max-width`, `height`) and alignment (`text-align`, `vertical-align`).
+- Links, with `target="_blank"` and `rel="noopener noreferrer nofollow"` forced.
+
+**Stripped**:
+
+- `<style>` blocks and every remote CSS mechanism (`<link rel="stylesheet">`), so styling must be inline; `class` and `id` attributes.
+- Scripts and event handlers (`on*`), frames, objects, forms and inputs.
+- Any inline declaration outside the allowlist — including `position`, `overflow`, offsets, `z-index`, `display`, `float`, `transform`, `filter`, `opacity`, `content`, custom properties and `calc()` — and any value that can load a URL or execute code: `url()`, `expression()`, `@import`, `behavior`, `-moz-binding`, `var()`, `env()`, `attr()`.
+- Tracking pixels and remote images according to `EMAIL_STRIP_TRACKING_PIXELS` and `EMAIL_BLOCK_REMOTE_IMAGES`; URL schemes other than `http`, `https` and `mailto`; protocol-relative URLs.
+
+There is no "trusted" pass-through and sanitization cannot be disabled. Only the `style` attribute is allowed: the Content-Security-Policy is unchanged (`style-src 'self' 'unsafe-inline'` already covers inline styles, and the page still has no inline script except the hashed copy button on the index). This is an inline-only policy: a newsletter that relies on `<style>` blocks or classes stays partially unstyled; its table structure, inline styles, `<font>` and `<center>` markup still render.
+
+**Payload impact**: preserved attributes and styles make the sanitized body larger than the previous policy served. On the reduced four-newsletter test corpus (TLDR, Morning Brew, SCMP, Kessel-family), `docs/bench/sanitizer-size-impact.ts` measures **+97% versus the previous sanitized payload** (+81% to +111% per fixture), while the sanitized output remains 16% smaller than the raw sender HTML. Style-heavy commercial newsletters are expected around 10–30%; the dense fixtures sit above that range. Feed bodies change once after deployment, so readers refetch; the sanitized-body cache keeps the extra bytes bounded.
+
 ## Dependency audit
 
 `npm audit --omit=dev` is a blocking CI gate on pull requests and on main: an unallowlisted high or critical production advisory fails the build. Exceptions, if ever needed, go to `.github/audit-allowlist.json` with an advisory id, package, scope, expiry date, reason and owner. The IMAP client is the maintained `imapflow`; the transitive `follow-redirects` and `source-map-js` versions are pinned through `overrides` in `feedwatcher-newsletter-server/package.json`.
@@ -304,7 +326,7 @@ When authentication is enabled (`AUTH_PASSWORD` non-empty), every endpoint below
 | `GET`  | `/rss/`           | List all available RSS feeds — HTML index page (with reader autodiscovery links) for browsers, JSON array for API clients |
 | `GET`  | `/rss/opml`       | OPML 2.0 export of all feeds, grouped under a `Newsletters` folder (importable into FeedWatcher and most RSS readers) |
 | `GET`  | `/rss/:id`        | Get the RSS feed for a specific sender by sender ID; `404` for unknown feeds, invalid tokens and ignored senders |
-| `GET`  | `/view/:emailId`  | Readable web view of one email (the feed items' permalink target); `404` for unknown or ignored emails |
+| `GET`  | `/view/:emailId`  | Readable web view of one email (the feed items' permalink target) with a link to its feed and to the newer/older item; `404` for unknown or ignored emails |
 | `GET`  | `/api/status`     | Unauthenticated readiness and ingestion health snapshot (see below); excluded from tracing |
 
 The sender ID is derived from the sender name by lowercasing it and removing all non-alphanumeric characters (e.g., `"The Daily Newsletter"` → `thedailynewsletter`). It is always lowercase ASCII: when a name contains no ASCII alphanumeric character (`中文日报`, `Новости`, an emoji-only name, ...), the id falls back to `sender-<8 hex chars>` — the first 8 characters of the SHA-1 of the trimmed, lowercased name — so every sender gets a distinct, stable, reachable feed. Distinct names that normalize to the same id (for example `"A/B"` and `"AB"`) share one feed; a warning listing them is logged when the index is built, and `FEED_OVERRIDES` can separate them. Existing non-empty ids are never rewritten, so current feed ids and subscriptions stay stable. It can be overridden per sender with `FEED_OVERRIDES` (see [Content and feeds](#content-and-feeds)).

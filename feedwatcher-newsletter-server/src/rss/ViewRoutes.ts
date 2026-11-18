@@ -1,11 +1,44 @@
-import { FastifyInstance } from "fastify";
+import { FastifyInstance, FastifyRequest } from "fastify";
 import { Config } from "../Config";
 import { OTelLogger, OTelRequestSpan, OTelRunWithRequestContext } from "../OTelContext";
-import { EmailItemGetById } from "../emails/EmailsData";
+import { EmailItemGetById, EmailItemsListById } from "../emails/EmailsData";
 import { SanitizedBodyCacheGet } from "../emails/SanitizedBodyCache";
-import { renderViewPage } from "./HtmlPages";
+import {
+  FeedIdentityGetFeedId,
+  FeedIdentityGetFeedUrlId,
+  FeedIdentityGetTitle,
+} from "../feeds/FeedIdentity";
+import { FeedListingGetBaseUrl } from "../feeds/FeedListing";
+import { renderViewPage, ViewPageNavigation } from "./HtmlPages";
 
 const logger = OTelLogger().createModuleLogger("ViewRoutes");
+
+// Feed link and newer/older neighbours for the /view page. The containing
+// feed's items are newest-first, so the previous index is the newer item and
+// the next index the older one. An item whose sender is not listed as a feed
+// (unknown sender) gets no navigation.
+function buildViewNavigation(
+  config: Config,
+  request: FastifyRequest,
+  email: { id: string; senderName: string; senderEmail: string },
+): ViewPageNavigation {
+  const feedId = FeedIdentityGetFeedId(email.senderName, email.senderEmail);
+  const items = EmailItemsListById(feedId);
+  const index = items.findIndex((item) => item.id === email.id);
+  if (index === -1) {
+    return {};
+  }
+  return {
+    feed: {
+      url: `${FeedListingGetBaseUrl(config, request)}/rss/${FeedIdentityGetFeedUrlId(
+        feedId,
+      )}`,
+      title: FeedIdentityGetTitle(email.senderName, email.senderEmail),
+    },
+    previous: index > 0 ? items[index - 1] : undefined,
+    next: index + 1 < items.length ? items[index + 1] : undefined,
+  };
+}
 
 // Readable permalink pages for individual emails, the link target of feed
 // items.
@@ -31,7 +64,8 @@ export class ViewRoutes {
             this.config.EMAIL_STRIP_TRACKING_PIXELS,
             this.config.EMAIL_BLOCK_REMOTE_IMAGES,
           );
-          return reply.send(renderViewPage(email, sanitized.html));
+          const navigation = buildViewNavigation(this.config, request, email);
+          return reply.send(renderViewPage(email, sanitized.html, navigation));
         }),
     );
   };

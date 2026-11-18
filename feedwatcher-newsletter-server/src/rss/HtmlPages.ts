@@ -1,5 +1,11 @@
 import { EmailItem } from "../emails/EmailFetcher";
 
+export interface ViewPageNavigation {
+  feed?: { url: string; title: string };
+  previous?: { id: string; subject: string };
+  next?: { id: string; subject: string };
+}
+
 interface FeedForIndex {
   feedUrl: string;
   title: string;
@@ -103,6 +109,13 @@ const SHARED_CSS = `
     overflow-wrap: anywhere;
   }
   .email-body img { max-width: 100%; height: auto; }
+  .email-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    font-size: 0.9rem;
+    margin: 0 0 1rem;
+  }
   .back { display: inline-block; margin-bottom: 1rem; }
 `;
 
@@ -166,9 +179,44 @@ ${discoveryLinks}
 `;
 }
 
+// Items are listed newest-first, so "previous" is the newer neighbour and
+// "next" the older one.
+function renderViewNavigation(navigation: ViewPageNavigation): string {
+  const links: string[] = [];
+  if (navigation.feed) {
+    links.push(
+      `<a class="nav-feed" href="${escapeHtml(
+        navigation.feed.url,
+      )}">Feed: ${escapeHtml(navigation.feed.title)}</a>`,
+    );
+  }
+  if (navigation.previous) {
+    links.push(
+      `<a class="nav-newer" href="/view/${encodeURIComponent(
+        navigation.previous.id,
+      )}">&larr; Newer: ${escapeHtml(navigation.previous.subject)}</a>`,
+    );
+  }
+  if (navigation.next) {
+    links.push(
+      `<a class="nav-older" href="/view/${encodeURIComponent(
+        navigation.next.id,
+      )}">Older: ${escapeHtml(navigation.next.subject)} &rarr;</a>`,
+    );
+  }
+  if (links.length === 0) {
+    return "";
+  }
+  return `  <nav class="email-nav" aria-label="Email navigation">
+    ${links.join("\n    ")}
+  </nav>
+`;
+}
+
 export function renderViewPage(
   email: EmailItem,
   sanitizedBody: string,
+  navigation: ViewPageNavigation = {},
 ): string {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -185,7 +233,7 @@ export function renderViewPage(
   <p class="email-meta">${escapeHtml(email.senderName)} &lt;${escapeHtml(
     email.senderEmail,
   )}&gt; · ${escapeHtml(new Date(email.dateReceived).toUTCString())}</p>
-  <div class="email-body">${sanitizedBody}</div>
+${renderViewNavigation(navigation)}  <div class="email-body">${sanitizedBody}</div>
 </main>
 </body>
 </html>

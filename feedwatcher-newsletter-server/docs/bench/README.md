@@ -93,3 +93,37 @@ copy (~96 MB of body strings) plus the 32 MiB sanitized cache (accounted at
 raw UTF-16 size, so up to ~64 MB of heap) — 539 MB peak with a 1 GiB container
 limit leaves roughly 480 MB of headroom. Retention bounds the journal, so the
 index does not grow without limit.
+
+# Sanitizer policy size impact
+
+Repeatable measurement of the payload impact of the newsletter layout-fidelity
+policy (safe table attributes and inline styles preserved). The same reduced
+corpus is sanitized with the pre-change options (baseline at `23001dd`,
+measurement only) and with the current `HtmlSanitizerSanitize`.
+
+## Method
+
+```bash
+cd feedwatcher-newsletter-server
+npx tsx docs/bench/sanitizer-size-impact.ts
+```
+
+The script loads the four reduced fixtures in `src/emails/fixtures/` (TLDR,
+Morning Brew, SCMP, Kessel-family), sanitizes each with both option sets and
+prints raw, legacy and current byte counts plus the relative change. No
+network, no journal and no app instance are needed.
+
+## Result (2026-11-18)
+
+| Fixture | Raw | Legacy | Current | Current vs legacy | Current vs raw |
+| --- | --- | --- | --- | --- | --- |
+| tldr | 6,200 | 3,027 | 5,480 | +81.0% | −11.6% |
+| morning-brew | 4,033 | 1,710 | 3,611 | +111.2% | −10.5% |
+| scmp | 4,695 | 2,107 | 4,199 | +99.3% | −10.6% |
+| kessel | 4,485 | 1,439 | 3,035 | +110.9% | −32.3% |
+| **total** | **19,413** | **8,283** | **16,325** | **+97.1%** | **−15.9%** |
+
+The fixtures are dense, style-heavy reconstructions, so the increase over the
+previous sanitized payload is larger than the 10–30% expected for typical
+newsletters. The sanitized body still ends up 16% smaller than the raw sender
+HTML. The trade-off is intentional: layout fidelity on every served item.
