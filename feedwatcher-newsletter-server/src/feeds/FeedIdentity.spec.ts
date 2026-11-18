@@ -13,6 +13,7 @@ import {
   FeedIdentityPruneTokens,
   FeedIdentityResolveFeedUrlId,
 } from "./FeedIdentity";
+import { FeedSettingsSave } from "./FeedSettings";
 
 jest.mock("../OTelContext", () => {
   const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
@@ -201,8 +202,66 @@ describe("FeedIdentityGetTitle", () => {
   });
 });
 
-describe("FeedIdentityIsSenderIgnored", () => {
-  it("matches terms against sender name and email, case-insensitively", () => {
+describe("feed settings precedence", () => {
+  it("a sender rule wins over an environment override for feed id and title", () => {
+    initTmp({
+      overrides: {
+        "news@example.com": { feedId: "daily-env", title: "Env Title" },
+      },
+    });
+    FeedSettingsSave({
+      version: 1,
+      feeds: {},
+      senders: {
+        "News@Example.com": { feedId: "daily-file", title: "File Title" },
+      },
+    });
+    expect(FeedIdentityGetFeedId("Whatever", "news@example.com")).toBe(
+      "daily-file",
+    );
+    expect(FeedIdentityGetTitle("Whatever", "news@example.com")).toBe(
+      "File Title",
+    );
+  });
+
+  it("falls back to the environment override and then to the sender", () => {
+    initTmp({
+      overrides: { "weekly@example.com": { feedId: "weekly", title: "Weekly" } },
+    });
+    FeedSettingsSave({
+      version: 1,
+      feeds: {},
+      senders: { "daily@example.com": { title: "Daily from file" } },
+    });
+    expect(FeedIdentityGetFeedId("The Weekly", "weekly@example.com")).toBe(
+      "weekly",
+    );
+    expect(FeedIdentityGetTitle("The Weekly", "weekly@example.com")).toBe(
+      "Weekly",
+    );
+    expect(FeedIdentityGetFeedId("The Daily", "daily@example.com")).toBe(
+      "thedaily",
+    );
+    expect(FeedIdentityGetTitle("The Daily", "daily@example.com")).toBe(
+      "Daily from file",
+    );
+  });
+
+  it("a sender rule splits senders that share a normalized feed id", () => {
+    initTmp();
+    expect(FeedIdentityGetFeedId("A/B", "a@example.com")).toBe("ab");
+    expect(FeedIdentityGetFeedId("AB", "b@example.com")).toBe("ab");
+    FeedSettingsSave({
+      version: 1,
+      feeds: {},
+      senders: { "b@example.com": { feedId: "ab-separate" } },
+    });
+    expect(FeedIdentityGetFeedId("A/B", "a@example.com")).toBe("ab");
+    expect(FeedIdentityGetFeedId("AB", "b@example.com")).toBe("ab-separate");
+  });
+});
+
+describe("FeedIdentityIsSenderIgnored", () => {  it("matches terms against sender name and email, case-insensitively", () => {
     initTmp({ ignoreList: "billing, no-reply@shop.com" });
     expect(FeedIdentityIsSenderIgnored("Billing Team", "care@shop.com")).toBe(
       true,

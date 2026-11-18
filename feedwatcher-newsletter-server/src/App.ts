@@ -9,10 +9,17 @@ import {
   OTelSetTracer,
   OTelTracer,
 } from "./OTelContext";
-import { SchedulerInit, SchedulerReload, SchedulerStop } from "./Scheduler";
+import {
+  SchedulerInit,
+  SchedulerOnFeedSettingsChanged,
+  SchedulerReload,
+  SchedulerStop,
+} from "./Scheduler";
+import { FeedSettingsGetFilePath, FeedSettingsReload } from "./feeds/FeedSettings";
 
 let fastifyInstance: FastifyInstance | undefined;
 let watchedConfigFile: string | undefined;
+let watchedFeedSettingsFile: string | undefined;
 let shutdownPromise: Promise<void> | undefined;
 let shutdownRequested = false;
 let shutdownHandlersRegistered = false;
@@ -33,6 +40,9 @@ async function performShutdown(): Promise<void> {
     const schedulerStopped = SchedulerStop();
     if (watchedConfigFile) {
       fse.unwatchFile(watchedConfigFile);
+    }
+    if (watchedFeedSettingsFile) {
+      fse.unwatchFile(watchedFeedSettingsFile);
     }
     try {
       await fastifyInstance?.close();
@@ -134,6 +144,39 @@ export async function startServer(): Promise<void> {
       reloading = false;
     }
   });
+
+  // Hot reload of the feed curation file. The file is the source of truth for
+  // feed settings and may be edited by hand or replaced (tmp+rename) by the
+  // management API; watchFile survives the inode swap of an atomic rename.
+  // A missing file resets to the empty defaults, an invalid one keeps the last
+  // applied settings. Errors are logged, never thrown, and a re-entrancy guard
+  // absorbs poll overlaps.
+  const feedSettingsPath = FeedSettingsGetFilePath();
+  if (feedSettingsPath) {
+    let reloadingSettings = false;
+    watchedFeedSettingsFile = feedSettingsPath;
+    fse.watchFile(feedSettingsPath, { interval: 1000 }, () => {
+      if (reloadingSettings) return;
+      reloadingSettings = true;
+      try {
+        if (FeedSettingsReload()) {
+          logger.info(`Feed settings reloaded from ${feedSettingsPath}`);
+        } else {
+          logger.warn(
+            `Ignoring feed settings reload: ${feedSettingsPath} is invalid; keeping the last applied settings`,
+          );
+        }
+        SchedulerOnFeedSettingsChanged();
+      } catch (err) {
+        logger.error(
+          `Ignoring feed settings reload: ${(err as Error).message}; keeping the last applied settings`,
+          err as Error,
+        );
+      } finally {
+        reloadingSettings = false;
+      }
+    });
+  }
 
   // API
 

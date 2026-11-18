@@ -2,6 +2,7 @@ import { FastifyRequest } from "fastify";
 import { Config } from "../Config";
 import { EmailFeedsListAll, FeedSummary } from "../emails/EmailsData";
 import { FeedIdentityGetFeedUrlId } from "./FeedIdentity";
+import { FeedSettingsGetMaxItems } from "./FeedSettings";
 
 // Feed URLs use PUBLIC_URL when configured, otherwise the incoming request.
 // request.host includes the port; request.protocol/request.host honour
@@ -21,8 +22,9 @@ export interface FeedListEntry extends FeedSummary {
   servedItemCount: number;
 }
 
-// The feed is the bounded "recent" window: it serves at most FEED_MAX_ITEMS
-// emails, while retention and the archive keep every stored email.
+// The feed is the bounded "recent" window: it serves at most the effective
+// maxItems emails (per-feed setting, else FEED_MAX_ITEMS), while retention and
+// the archive keep every stored email.
 export function FeedListingServedItemCount(
   maxItems: number,
   itemCount: number,
@@ -42,7 +44,7 @@ export function FeedListingGetFeeds(
       feedUrl,
       archiveUrl: `${feedUrl}/archive`,
       servedItemCount: FeedListingServedItemCount(
-        config.FEED_MAX_ITEMS,
+        FeedSettingsGetMaxItems(feed.feedId, config.FEED_MAX_ITEMS),
         feed.itemCount,
       ),
     };

@@ -19,6 +19,14 @@ import {
   FeedIdentityResolveFeedUrlId,
 } from "../feeds/FeedIdentity";
 import {
+  FeedSettingsGetBlockRemoteImages,
+  FeedSettingsGetForFeed,
+  FeedSettingsGetMaxItems,
+  FeedSettingsGetStripTrackingPixels,
+  FeedSettingsIsHidden,
+  FeedSettingsResolveMergeTarget,
+} from "../feeds/FeedSettings";
+import {
   FeedListingGetBaseUrl,
   FeedListingGetFeeds,
   FeedListingServedItemCount,
@@ -119,18 +127,50 @@ export class RssRoutes {
           reply.code(404);
           return reply.send({ error: "Feed not found" });
         }
+        // Hidden is a read-path curation: the journal record and the token are
+        // untouched, so unhiding restores the same feed.
+        if (FeedSettingsIsHidden(resolved.feedId)) {
+          logger.info(`Hidden feed id: ${resolved.feedId}`, span);
+          reply.code(404);
+          return reply.send({ error: "Feed not found" });
+        }
+        const finalFeedId = FeedSettingsResolveMergeTarget(resolved.feedId);
+        if (finalFeedId !== resolved.feedId) {
+          if (FeedSettingsIsHidden(finalFeedId)) {
+            logger.info(
+              `Feed ${resolved.feedId} merges into hidden feed ${finalFeedId}`,
+              span,
+            );
+            reply.code(404);
+            return reply.send({ error: "Feed not found" });
+          }
+          // Readers holding a merged source token are redirected to the target
+          // feed with its own capability token.
+          reply.code(302);
+          reply.header(
+            "Location",
+            `/rss/${FeedIdentityGetFeedUrlId(finalFeedId)}`,
+          );
+          return reply.send();
+        }
 
         const baseUrl = FeedListingGetBaseUrl(this.config, request);
         const xml = RssFeedGeneratorBuildFeedById(
           span,
-          resolved.feedId,
+          finalFeedId,
           baseUrl,
-          this.config.EMAIL_STRIP_TRACKING_PIXELS,
-          this.config.EMAIL_BLOCK_REMOTE_IMAGES,
-          this.config.FEED_MAX_ITEMS,
+          FeedSettingsGetStripTrackingPixels(
+            finalFeedId,
+            this.config.EMAIL_STRIP_TRACKING_PIXELS,
+          ),
+          FeedSettingsGetBlockRemoteImages(
+            finalFeedId,
+            this.config.EMAIL_BLOCK_REMOTE_IMAGES,
+          ),
+          FeedSettingsGetMaxItems(finalFeedId, this.config.FEED_MAX_ITEMS),
         );
         if (xml === undefined) {
-          logger.info(`Unknown feed id: ${resolved.feedId}`, span);
+          logger.info(`Unknown feed id: ${finalFeedId}`, span);
           reply.code(404);
           return reply.send({ error: "Feed not found" });
         }
@@ -138,7 +178,7 @@ export class RssRoutes {
         return HttpConditionalSend(request, reply, {
           body: xml,
           contentType: "application/rss+xml; charset=utf-8",
-          lastModifiedMs: EmailsDataGetFeedLastModified(resolved.feedId),
+          lastModifiedMs: EmailsDataGetFeedLastModified(finalFeedId),
         });
       }),
     );
@@ -155,14 +195,44 @@ export class RssRoutes {
           reply.code(404);
           return reply.send({ error: "Feed not found" });
         }
-        const items = EmailItemsListById(resolved.feedId);
+        if (FeedSettingsIsHidden(resolved.feedId)) {
+          logger.info(`Hidden feed id: ${resolved.feedId}`, span);
+          reply.code(404);
+          return reply.send({ error: "Feed not found" });
+        }
+        const finalFeedId = FeedSettingsResolveMergeTarget(resolved.feedId);
+        if (finalFeedId !== resolved.feedId) {
+          if (FeedSettingsIsHidden(finalFeedId)) {
+            logger.info(
+              `Feed ${resolved.feedId} merges into hidden feed ${finalFeedId}`,
+              span,
+            );
+            reply.code(404);
+            return reply.send({ error: "Feed not found" });
+          }
+          reply.code(302);
+          reply.header(
+            "Location",
+            `/rss/${FeedIdentityGetFeedUrlId(finalFeedId)}/archive`,
+          );
+          return reply.send();
+        }
+        const items = EmailItemsListById(finalFeedId);
         if (items.length === 0) {
-          logger.info(`Unknown feed id: ${resolved.feedId}`, span);
+          logger.info(`Unknown feed id: ${finalFeedId}`, span);
           reply.code(404);
           return reply.send({ error: "Feed not found" });
         }
         const baseUrl = FeedListingGetBaseUrl(this.config, request);
-        const feedUrl = `${baseUrl}/rss/${FeedIdentityGetFeedUrlId(resolved.feedId)}`;
+        const feedUrl = `${baseUrl}/rss/${FeedIdentityGetFeedUrlId(finalFeedId)}`;
+        const stripTrackingPixels = FeedSettingsGetStripTrackingPixels(
+          finalFeedId,
+          this.config.EMAIL_STRIP_TRACKING_PIXELS,
+        );
+        const blockRemoteImages = FeedSettingsGetBlockRemoteImages(
+          finalFeedId,
+          this.config.EMAIL_BLOCK_REMOTE_IMAGES,
+        );
         const archiveItems = items.map((item) => ({
           id: item.id,
           subject: item.subject,
@@ -171,28 +241,30 @@ export class RssRoutes {
           senderEmail: item.senderEmail,
           summary: SanitizedBodyCacheGet(
             item,
-            this.config.EMAIL_STRIP_TRACKING_PIXELS,
-            this.config.EMAIL_BLOCK_REMOTE_IMAGES,
+            stripTrackingPixels,
+            blockRemoteImages,
           ).summary,
         }));
         return HttpConditionalSend(request, reply, {
           body: renderFeedArchivePage(
             {
-              title: FeedIdentityGetTitle(
-                items[0].senderName,
-                items[0].senderEmail,
-              ),
+              title:
+                FeedSettingsGetForFeed(finalFeedId)?.title ??
+                FeedIdentityGetTitle(
+                  items[0].senderName,
+                  items[0].senderEmail,
+                ),
               feedUrl,
               archiveUrl: `${feedUrl}/archive`,
             },
             archiveItems,
             FeedListingServedItemCount(
-              this.config.FEED_MAX_ITEMS,
+              FeedSettingsGetMaxItems(finalFeedId, this.config.FEED_MAX_ITEMS),
               items.length,
             ),
           ),
           contentType: "text/html; charset=utf-8",
-          lastModifiedMs: EmailsDataGetFeedLastModified(resolved.feedId),
+          lastModifiedMs: EmailsDataGetFeedLastModified(finalFeedId),
         });
       }),
     );

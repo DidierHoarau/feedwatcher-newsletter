@@ -26,6 +26,7 @@ FeedWatcher Newsletter is designed to be deployed as a container.
 - `emails.jsonl`: the append-only email journal. It backs retention, message-id deduplication and the in-memory feed index.
 - `last-uid.json`: the IMAP resume marker (`{ "uid": ..., "uidvalidity": ... }`). A legacy `last-uid.txt` marker is imported once and left in place.
 - `feed-tokens.json`: the persisted `<feedId>.<token>` private feed URL tokens.
+- `feed-settings.json`: optional self-service curation (per-feed title, visibility, item limit, privacy flags, merge target, and exact sender rules). Written by the management API/UI, also editable by hand; see [Feed settings file](#feed-settings-file-data_dirfeed-settingsjson).
 
 Without a persistent volume, every container or pod restart starts from an empty directory and:
 
@@ -159,7 +160,7 @@ The 1Gi memory limit reflects the in-memory index: a ~96 MB journal indexes to r
 
 # Security and privacy
 
-By default the service has **no authentication**: anyone who can reach the host can list the feeds (`/api/feeds` catalogue, `/rss/` HTML index and JSON list), fetch any feed, read any feed's archive (`/rss/<id>/archive`) and open any email at `/view/:emailId`. The archive is exactly as protected as its feed: it lives under `/rss/` with the same capability-token and strict-mode rules, is covered by the same HTTP Basic scope, and the per-feed `archiveUrl` is derived from the tokenized `feedUrl`. `FEED_PRIVATE_URLS` only obfuscates feed URLs (`<feedId>.<token>`): the index, the catalogue and the OPML export publish those URLs to every caller, and bare feed ids keep working unless strict private mode is enabled. Treat tokenized URLs as a convenience, not as access control. `SENDER_IGNORE_LIST` is enforced on every read path, so ignored senders are never listed and their feeds and permalinks are never served.
+By default the service has **no authentication**: anyone who can reach the host can list the feeds (`/api/feeds` catalogue, `/rss/` HTML index and JSON list), fetch any feed, read any feed's archive (`/rss/<id>/archive`), open any email at `/view/:emailId`, and read or rewrite the curation settings at `/manage` and `/api/feeds/settings`. The archive is exactly as protected as its feed: it lives under `/rss/` with the same capability-token and strict-mode rules, is covered by the same HTTP Basic scope, and the per-feed `archiveUrl` is derived from the tokenized `feedUrl`. `FEED_PRIVATE_URLS` only obfuscates feed URLs (`<feedId>.<token>`): the index, the catalogue and the OPML export publish those URLs to every caller, and bare feed ids keep working unless strict private mode is enabled. Treat tokenized URLs as a convenience, not as access control. `SENDER_IGNORE_LIST` is enforced on every read path, so ignored senders are never listed and their feeds and permalinks are never served.
 
 IMAP connections verify the server certificate by default (see [IMAP](#imap)). HTML pages are served with a Content-Security-Policy (hash-based for the inline copy script, so ETag/304 caching still works) and every response carries `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and a restrictive `Permissions-Policy`. RSS, JSON, catalogue and OPML payloads get the same baseline headers without the CSP; the global `no-referrer` policy prevents feed tokens from leaking through referrers when readers follow the autodiscovery links.
 
@@ -193,7 +194,7 @@ There is no "trusted" pass-through and sanitization cannot be disabled. Only the
 
 ## HTTP Basic authentication (optional)
 
-Set `AUTH_PASSWORD` (and optionally `AUTH_USERNAME`, default `feedwatcher`) to require HTTP Basic credentials on `/`, `/rss/*`, `/view/*` and `/api/feeds`. `/api/status` stays open for readiness probes. Authentication is disabled while `AUTH_PASSWORD` is empty, so an unchanged deployment keeps serving existing subscribers. Configure every feed reader (and browser) with the same credentials, and only send them over HTTPS. The password is registered as sensitive and masked in configuration logs; `AUTH_USERNAME` and `AUTH_PASSWORD` are applied on hot configuration reload.
+Set `AUTH_PASSWORD` (and optionally `AUTH_USERNAME`, default `feedwatcher`) to require HTTP Basic credentials on `/`, `/rss/*`, `/view/*`, `/manage` and `/api/feeds` (including `PUT /api/feeds/settings`). `/api/status` stays open for readiness probes. Authentication is disabled while `AUTH_PASSWORD` is empty, so an unchanged deployment keeps serving existing subscribers. Configure every feed reader (and browser) with the same credentials, and only send them over HTTPS. The password is registered as sensitive and masked in configuration logs; `AUTH_USERNAME` and `AUTH_PASSWORD` are applied on hot configuration reload.
 
 ## Strict private mode (optional)
 
@@ -278,6 +279,40 @@ When authentication is enabled (non-empty `AUTH_PASSWORD`), every endpoint excep
 
 A `feedId` must match `^[a-z0-9][a-z0-9-]{0,63}$` (lowercase ASCII letters, digits and hyphens, starting with a letter or digit). An invalid value (a dot, a slash, uppercase, empty, ...) is ignored with a warning and the derived id is used; the override `title`, when present, is still applied. Dots are rejected because feed URLs use `<feedId>.<token>`, so a dotted id would make the feed unreachable.
 
+### Feed settings file (`DATA_DIR/feed-settings.json`)
+
+Curation is stored separately from the email journal, so hiding, renaming or merging a feed never touches retained emails or feed tokens. The file is optional and versioned (`"version": 1`); the service creates it on the first successful save from `/manage` or `PUT /api/feeds/settings`:
+
+```json
+{
+  "version": 1,
+  "feeds": {
+    "thedaily": {
+      "title": "The Daily Brief",
+      "hidden": false,
+      "maxItems": 50,
+      "blockRemoteImages": true,
+      "stripTrackingPixels": true,
+      "mergeInto": "news-roundup"
+    },
+    "news-roundup": { "title": "All News" }
+  },
+  "senders": {
+    "alerts@scmp.com": { "feedId": "scmp", "title": "South China Morning Post" }
+  }
+}
+```
+
+- `feeds` is keyed by **base feed id** (the derived or `FEED_OVERRIDES` id, before any merge). Every field is optional; an omitted field inherits the environment.
+- `title` wins over `FEED_OVERRIDES` for the final feed. `maxItems` (non-negative integer, `0` = unlimited), `blockRemoteImages` and `stripTrackingPixels` override `FEED_MAX_ITEMS`, `EMAIL_BLOCK_REMOTE_IMAGES` and `EMAIL_STRIP_TRACKING_PIXELS` for that feed only.
+- `hidden: true` removes the feed from the index, OPML, catalogue, feed routes and archive (they return `404`). The journal and the feed token are kept, so unhiding restores the same URL.
+- `mergeInto` groups the source's items into the target feed. A source URL redirects (`302`) to the target's tokenized URL, transitively; cycles, self-merges and chains longer than 16 links are rejected on write. Hidden wins over merge: a hidden source stays hidden even when merged, and a hidden final target hides its sources (`404`).
+- `senders` maps an **exact email address or sender name** (case-insensitive) to a `feedId` and/or `title`. Sender rules take precedence over `FEED_OVERRIDES` and let two senders that normalize to the same id (for example `A/B` and `AB`) become separate feeds. `FEED_OVERRIDES` remains the global environment-level default; `SENDER_IGNORE_LIST` still drops emails at ingestion time.
+- Edits are hot-reloaded (1 s poll) and applied immediately. Writes from the API/UI are validated strictly and replaced atomically (temp file, fsync, rename); a hand-edited file is read leniently: invalid entries or fields are dropped with a warning and the rest is applied. An unsupported `version` or invalid JSON keeps the last applied settings.
+- The `/manage` page is a server-rendered form (no JavaScript); saving it requires the per-process CSRF token embedded in the page. The JSON API is CSRF-safe by construction: `PUT` requires `Content-Type: application/json` and the `X-Feedwatcher-Csrf: 1` header, so a cross-site form cannot write. See [`feedwatcher-newsletter-server/docs/api/feed-settings.md`](feedwatcher-newsletter-server/docs/api/feed-settings.md).
+
+`/manage` is a single-instance form: its CSRF token is per process. In a multi-replica deployment use the stateless JSON API.
+
 ### Retention vs feed window
 
 `EMAIL_RETENTION_DAYS` bounds storage: it decides which emails are kept and purged. `FEED_MAX_ITEMS` only truncates what the RSS feed serves: the feed carries the newest `FEED_MAX_ITEMS` emails of its sender, newest first. Nothing is deleted or reordered, and every retained email stays reachable at `/view/:emailId` and in the per-feed archive at `/rss/<id>/archive`. Set `FEED_MAX_ITEMS=0` to serve the full retained history again.
@@ -306,6 +341,8 @@ A `feedId` must match `^[a-z0-9][a-z0-9-]{0,63}$` (lowercase ASCII letters, digi
 
 `config.json` is watched and reloaded without a restart. These values are applied immediately: `EMAIL_FETCH_CRON` (the job is rescheduled), `EMAIL_RETENTION_DAYS`, `EMAIL_FETCH_IDLE` (the IDLE connection is started or stopped), `SENDER_IGNORE_LIST`, `FEED_OVERRIDES`, `FEED_PRIVATE_URLS`, `FEED_PRIVATE_URLS_STRICT`, `FEED_MAX_ITEMS`, `AUTH_USERNAME`, `AUTH_PASSWORD`, `PUBLIC_URL`, `EMAIL_STRIP_TRACKING_PIXELS`, `EMAIL_BLOCK_REMOTE_IMAGES` and the `EMAIL_FETCH_*` knobs. The IMAP settings (`IMAP_HOST`, `IMAP_PORT`, `IMAP_TLS`, `IMAP_USER`, `IMAP_PASSWORD`, `IMAP_MAILBOX`, `IMAP_TLS_INSECURE`, `IMAP_TLS_CA_FILE`) are re-read on every fetch and apply on the next fetch; the long-lived IDLE connection applies them on its next reconnect (`IMAP_IDLE_SOCKET_TIMEOUT_MS` likewise). These are **restart-only** (a warning is logged when they change): `DATA_DIR`, `API_PORT`, `TRUST_PROXY` and the OpenTelemetry exporter settings (`OPENTELEMETRY_COLLECTOR_HTTP_TRACES`, `OPENTELEMETRY_COLLECTOR_HTTP_METRICS`, `OPENTELEMETRY_COLLECTOR_HTTP_LOGS`, `OPENTELEMETRY_COLLECTOR_AWS`, `OPENTELEMETRY_COLLECTOR_EXPORT_LOGS_INTERVAL_SECONDS`, `OPENTELEMETRY_COLLECTOR_EXPORT_METRICS_INTERVAL_SECONDS`, `OPENTELEMETRY_COLLECT_AUTHORIZATION_HEADER`). An unreadable or unparsable `config.json` is ignored and the last valid configuration stays active. A semantically invalid value (for example a non-numeric `EMAIL_RETENTION_DAYS`, a non-boolean `EMAIL_FETCH_IDLE` or a malformed `FEED_OVERRIDES`) rejects the whole reload: no value from that file is applied, the previous configuration stays active, the error is logged with the failing field, and the server keeps running. Retention, cron, IDLE and feed identity are updated only after a fully successful reload.
 
+`DATA_DIR/feed-settings.json` is watched independently (1 s poll). A valid file is applied immediately to listings, feeds, archives, permalinks and the catalogue; an invalid file keeps the last applied settings. Saves from `/manage` and `PUT /api/feeds/settings` also apply immediately, without waiting for the watcher.
+
 ## OpenTelemetry
 
 | Variable                                                  | Description                                 | Default |
@@ -318,7 +355,7 @@ A `feedId` must match `^[a-z0-9][a-z0-9-]{0,63}$` (lowercase ASCII letters, digi
 | `OPENTELEMETRY_COLLECTOR_AWS`                             | Enable AWS OTel collector                   | `false` |
 | `OPENTELEMETRY_COLLECT_AUTHORIZATION_HEADER`              | Authorization header for the OTel collector |         |
 
-Tracing covers the product routes: `/`, `/rss/*`, `/view/*` and `/api/feeds` produce an HTTP server span (`GET-<route>`), and each feed build runs inside it as a `RssFeedGeneratorBuildFeedById` child span. Requests that match no route are named by their method (`GET`) to keep span-name cardinality bounded. `/api/status` is excluded from tracing because the readiness probe pollutes the trace list with it. The service emits **no metrics**: the Fastify hooks are registered without a meter. The span's `url.path` is the matched route template (for example `/rss/:id`); for unmatched paths, every dotted (token-like) segment is replaced with `:redacted`, so capability tokens never reach the trace backend.
+Tracing covers the product routes: `/`, `/rss/*`, `/view/*`, `/manage` and `/api/feeds*` produce an HTTP server span (`GET-<route>`), and each feed build runs inside it as a `RssFeedGeneratorBuildFeedById` child span. Requests that match no route are named by their method (`GET`) to keep span-name cardinality bounded. `/api/status` is excluded from tracing because the readiness probe pollutes the trace list with it. The service emits **no metrics**: the Fastify hooks are registered without a meter. The span's `url.path` is the matched route template (for example `/rss/:id`); for unmatched paths, every dotted (token-like) segment is replaced with `:redacted`, so capability tokens never reach the trace backend.
 
 `service.version` is read from `feedwatcher-newsletter-server/package.json` (the runtime image ships that manifest), so traces, logs and metrics identify the application version rather than the installed shared library version. An explicit `VERSION` environment variable or config file value still overrides it.
 
@@ -334,13 +371,17 @@ When authentication is enabled (`AUTH_PASSWORD` non-empty), every endpoint below
 | `GET`  | `/rss/:id`        | Get the RSS feed for a specific sender by sender ID; serves the newest `FEED_MAX_ITEMS` emails; `404` for unknown feeds, invalid tokens and ignored senders |
 | `GET`  | `/rss/:id/archive` | HTML archive of **all retained** emails of one feed (subject, date, sender, summary), newest first; same auth and token rules as its feed |
 | `GET`  | `/view/:emailId`  | Readable web view of one email (the feed items' permalink target) with a link to its feed and to the newer/older item; `404` for unknown or ignored emails |
+| `GET`  | `/manage`         | Server-rendered feed curation page (hide, rename, merge, per-feed limits/privacy, sender rules); protected by Basic auth when enabled |
+| `POST` | `/manage`         | Save the `/manage` form (URL-encoded) with its CSRF token; redirects to `/manage?saved=1` |
+| `GET`  | `/api/feeds/settings` | Current `feed-settings.json` document (versioned JSON, `Cache-Control: no-store`) |
+| `PUT`  | `/api/feeds/settings` | Validate and atomically replace the settings document; requires `Content-Type: application/json` and `X-Feedwatcher-Csrf: 1`; `400` lists field errors |
 | `GET`  | `/api/status`     | Unauthenticated readiness and ingestion health snapshot (see below); excluded from tracing |
 
 The sender ID is derived from the sender name by lowercasing it and removing all non-alphanumeric characters (e.g., `"The Daily Newsletter"` → `thedailynewsletter`). It is always lowercase ASCII: when a name contains no ASCII alphanumeric character (`中文日报`, `Новости`, an emoji-only name, ...), the id falls back to `sender-<8 hex chars>` — the first 8 characters of the SHA-1 of the trimmed, lowercased name — so every sender gets a distinct, stable, reachable feed. Distinct names that normalize to the same id (for example `"A/B"` and `"AB"`) share one feed; a warning listing them is logged when the index is built, and `FEED_OVERRIDES` can separate them. Existing non-empty ids are never rewritten, so current feed ids and subscriptions stay stable. It can be overridden per sender with `FEED_OVERRIDES` (see [Content and feeds](#content-and-feeds)).
 
 The feed list, the catalogue, the OPML export and every feed answer conditional requests: they carry an `ETag` and `Last-Modified` and return `304 Not Modified` for `If-None-Match`/`If-Modified-Since`, so pollers do not re-download unchanged feeds. Feed payloads and the HTML pages are compressed with gzip/brotli when the client advertises support; `Accept-Encoding`-less requests get the identity body. See [Performance and HTTP caching](#performance-and-http-caching).
 
-When `FEED_PRIVATE_URLS` is enabled (default), the catalogue, the list and the OPML export advertise feed URLs of the form `<feedId>.<randomToken>` (e.g. `thedailynewsletter.9f86d081884c7d65`), persisted in `DATA_DIR/feed-tokens.json`. Tokens are created only for existing feeds, are pruned at startup when their feed disappears, and an invalid token never creates an entry. Bare feed ids keep working so existing reader subscriptions are unaffected, unless `FEED_PRIVATE_URLS_STRICT=true` is set — then bare ids return `404` and only tokenized URLs are served.
+When `FEED_PRIVATE_URLS` is enabled (default), the catalogue, the list and the OPML export advertise feed URLs of the form `<feedId>.<randomToken>` (e.g. `thedailynewsletter.9f86d081884c7d65`), persisted in `DATA_DIR/feed-tokens.json`. Tokens are created only for existing feeds, are pruned at startup when their feed disappears, and an invalid token never creates an entry. Hiding or merging a feed keeps its token, so unhiding restores the same URL; tokens referenced only by `feed-settings.json` are preserved too. Bare feed ids keep working so existing reader subscriptions are unaffected, unless `FEED_PRIVATE_URLS_STRICT=true` is set — then bare ids return `404` and only tokenized URLs are served.
 
 The `/rss/` JSON list keeps its legacy shape and additionally exposes the catalogue metadata; existing consumers are unaffected:
 
@@ -388,10 +429,10 @@ The HTML index also advertises one `<link rel="alternate" type="application/rss+
 | ------------- | ----------- |
 | `version`     | Contract version, currently `1`. Additive fields keep the version; removals, renames and type changes bump it. |
 | `feedId`      | Stable key derived from the sender (or `FEED_OVERRIDES`); it does not change when a private token rotates. |
-| `title`       | Override-aware feed title, falling back to the sender name. |
-| `senderName` / `senderEmail` | Sender of the feed's latest retained email. |
-| `itemCount`   | Number of retained emails in the feed. |
-| `servedItemCount` | Number of emails the RSS feed actually serves: `min(itemCount, FEED_MAX_ITEMS)`, or `itemCount` when the cap is `0`. |
+| `title`       | Feed title: `feed-settings.json` per-feed title, then `FEED_OVERRIDES`, then the sender name. |
+| `senderName` / `senderEmail` | Sender of the feed's latest retained email (for a merged feed, the latest item across its sources). |
+| `itemCount`   | Number of retained emails in the feed; a merged source's items are counted in its target. |
+| `servedItemCount` | Number of emails the RSS feed actually serves: `min(itemCount, effective maxItems)`, where the per-feed `maxItems` overrides `FEED_MAX_ITEMS`; `itemCount` when the cap is `0`. |
 | `latestDate`  | Effective received date of the latest retained email, ISO-8601: the `Date` header clamped to the local ingestion time, so it is never in the future. |
 | `feedUrl`     | Currently advertised feed URL (`/rss/<feedId>` or `/rss/<feedId>.<token>`). |
 | `archiveUrl`  | HTML archive listing every retained email of the feed (`feedUrl` + `/archive`); same capability token and Basic auth as `feedUrl`. |
@@ -401,8 +442,9 @@ The HTML index also advertises one `<link rel="alternate" type="application/rss+
 - **Conditional requests** are supported (`ETag`, `Last-Modified`, `304`, `Cache-Control: private, no-cache`).
 - **Consumers should key on `feedId`**, not on `feedUrl`: private URLs are capability URLs that may rotate, and `FEED_PRIVATE_URLS_STRICT=true` rejects bare ids. Refresh `feedUrl` from the catalogue instead of persisting it as the identity. Set `PUBLIC_URL` so catalogue URLs do not depend on the request `Host`.
 - **Feed window vs archive**: `/rss/:id` serves the newest `servedItemCount` emails, while `itemCount` and `archiveUrl` cover every retained email. A consumer can show "`servedItemCount` of `itemCount` available" and link to the archive for older items.
+- **Hidden and merged feeds** (see [Feed settings file](#feed-settings-file-data_dirfeed-settingsjson)): hidden feeds are absent from every representation and return `404`; a merged source is absent and its items appear in the target. The catalogue contract version stays `1`.
 
-The full contract (fields, versioning rule, overrides, private-URL modes) is documented in [`feedwatcher-newsletter-server/docs/api/feeds-catalogue.md`](feedwatcher-newsletter-server/docs/api/feeds-catalogue.md).
+The full contract (fields, versioning rule, overrides, private-URL modes, hidden/merge filtering) is documented in [`feedwatcher-newsletter-server/docs/api/feeds-catalogue.md`](feedwatcher-newsletter-server/docs/api/feeds-catalogue.md).
 
 ## Status
 

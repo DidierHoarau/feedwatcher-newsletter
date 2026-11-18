@@ -2,6 +2,7 @@ import RSS from "rss";
 import { Span } from "@opentelemetry/api";
 import { OTelTracer } from "../OTelContext";
 import { FeedIdentityGetFeedUrlId, FeedIdentityGetTitle } from "../feeds/FeedIdentity";
+import { FeedSettingsGetForFeed } from "../feeds/FeedSettings";
 import { EmailItemsListById, EmailsDataGetFeedLastModified, EmailItemGetEffectiveDateReceived } from "./EmailsData";
 import { SanitizedBodyCacheGet } from "./SanitizedBodyCache";
 
@@ -25,7 +26,11 @@ export function RssFeedGeneratorBuildFeedById(
     }
     const senderName = emails[0].senderName;
     const senderEmail = emails[0].senderEmail;
-    const title = FeedIdentityGetTitle(senderName, senderEmail);
+    // A per-feed title (feed-settings.json) names the final feed, including a
+    // merged target; otherwise the identity title applies.
+    const title =
+      FeedSettingsGetForFeed(id)?.title ??
+      FeedIdentityGetTitle(senderName, senderEmail);
     const feedUrlId = FeedIdentityGetFeedUrlId(id);
 
     const feed = new RSS({

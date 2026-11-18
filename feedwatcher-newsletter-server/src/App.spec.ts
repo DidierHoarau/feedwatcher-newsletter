@@ -34,8 +34,14 @@ jest.mock("./Config", () => {
 
 jest.mock("./Scheduler", () => ({
   SchedulerInit: jest.fn().mockResolvedValue(undefined),
+  SchedulerOnFeedSettingsChanged: jest.fn(),
   SchedulerReload: jest.fn(),
   SchedulerStop: jest.fn().mockResolvedValue(undefined),
+}));
+
+jest.mock("./feeds/FeedSettings", () => ({
+  FeedSettingsGetFilePath: jest.fn(() => "feed-settings.json"),
+  FeedSettingsReload: jest.fn(() => true),
 }));
 
 jest.mock("./AppBuilder", () => {
@@ -49,11 +55,28 @@ jest.mock("./AppBuilder", () => {
 });
 
 jest.mock("fs-extra", () => {
-  const state: { watchCallback?: () => Promise<void> } = {};
+  const state: {
+    watchCallback?: () => Promise<void>;
+    settingsWatchCallback?: () => Promise<void>;
+  } = {};
   return {
-    watchFile: jest.fn((_file: string, callback: () => Promise<void>) => {
-      state.watchCallback = callback;
-    }),
+    watchFile: jest.fn(
+      (
+        file: string,
+        optionsOrCallback: unknown,
+        maybeCallback?: () => Promise<void>,
+      ) => {
+        const callback =
+          typeof optionsOrCallback === "function"
+            ? optionsOrCallback
+            : maybeCallback;
+        if (file === "config.json") {
+          state.watchCallback = callback as () => Promise<void>;
+        } else {
+          state.settingsWatchCallback = callback as () => Promise<void>;
+        }
+      },
+    ),
     unwatchFile: jest.fn(),
     readJson: jest.fn(),
     __state: state,
@@ -66,6 +89,7 @@ const schedulerMock = jest.requireMock("./Scheduler");
 const appBuilderMock = jest.requireMock("./AppBuilder");
 const fseMock = jest.requireMock("fs-extra");
 const fseState = fseMock.__state;
+const feedSettingsMock = jest.requireMock("./feeds/FeedSettings");
 
 // Capture the signal handlers instead of registering real process listeners,
 // so a test that fires SIGTERM cannot leak into other suites.
@@ -270,6 +294,63 @@ describe("startServer", () => {
   });
 });
 
+describe("feed settings hot reload", () => {
+  it("watches the settings file with a one second poll interval", async () => {
+    await startServer();
+    expect(fseMock.watchFile).toHaveBeenCalledWith(
+      "feed-settings.json",
+      { interval: 1000 },
+      expect.any(Function),
+    );
+  });
+
+  it("applies a changed file and notifies the scheduler", async () => {
+    await startServer();
+    await fseState.settingsWatchCallback();
+
+    expect(feedSettingsMock.FeedSettingsReload).toHaveBeenCalledTimes(1);
+    expect(schedulerMock.SchedulerOnFeedSettingsChanged).toHaveBeenCalledTimes(
+      1,
+    );
+    expect(otelMock.__logger.info).toHaveBeenCalledWith(
+      "Feed settings reloaded from feed-settings.json",
+    );
+  });
+
+  it("keeps the last settings and logs when the file is invalid", async () => {
+    await startServer();
+    feedSettingsMock.FeedSettingsReload.mockReturnValueOnce(false);
+
+    await fseState.settingsWatchCallback();
+
+    expect(otelMock.__logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("Ignoring feed settings reload"),
+    );
+    expect(schedulerMock.SchedulerOnFeedSettingsChanged).toHaveBeenCalledTimes(
+      1,
+    );
+  });
+
+  it("never rejects the watcher and resets its guard on errors", async () => {
+    await startServer();
+    feedSettingsMock.FeedSettingsReload.mockImplementationOnce(() => {
+      throw new Error("read failure");
+    });
+
+    expect(() => fseState.settingsWatchCallback()).not.toThrow();
+
+    expect(otelMock.__logger.error).toHaveBeenCalledWith(
+      expect.stringContaining("Ignoring feed settings reload"),
+      expect.objectContaining({ message: "read failure" }),
+    );
+    expect(exitMock).not.toHaveBeenCalled();
+
+    feedSettingsMock.FeedSettingsReload.mockReturnValueOnce(true);
+    await fseState.settingsWatchCallback();
+    expect(feedSettingsMock.FeedSettingsReload).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("Shutdown", () => {
   it("stops the scheduler, unwatches the config and closes the API once", async () => {
     await startServer();
@@ -278,6 +359,7 @@ describe("Shutdown", () => {
 
     expect(schedulerMock.SchedulerStop).toHaveBeenCalledTimes(1);
     expect(fseMock.unwatchFile).toHaveBeenCalledWith("config.json");
+    expect(fseMock.unwatchFile).toHaveBeenCalledWith("feed-settings.json");
     expect(appBuilderMock.__close).toHaveBeenCalledTimes(1);
 
     await Shutdown();

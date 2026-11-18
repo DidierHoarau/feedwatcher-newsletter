@@ -7,6 +7,7 @@ import { IdleWatcherStart, IdleWatcherStop } from "./emails/IdleWatcher";
 import {
   EmailsDataPurgeExpired,
   EmailsDataSetRetentionDays,
+  EmailFeedIdsListAllForTokens,
   EmailFeedsListAll,
 } from "./emails/EmailsData";
 import { FeedIdentityInit, FeedIdentityPruneTokens } from "./feeds/FeedIdentity";
@@ -23,6 +24,7 @@ jest.mock("./emails/EmailsData", () => ({
   EmailsDataInit: jest.fn(),
   EmailsDataPurgeExpired: jest.fn(),
   EmailsDataSetRetentionDays: jest.fn(),
+  EmailFeedIdsListAllForTokens: jest.fn(),
   EmailFeedsListAll: jest.fn(),
 }));
 jest.mock("./feeds/FeedIdentity", () => ({
@@ -58,6 +60,7 @@ const idleStopMock = IdleWatcherStop as unknown as jest.Mock;
 const purgeMock = EmailsDataPurgeExpired as unknown as jest.Mock;
 const scheduleJobMock = schedule.scheduleJob as unknown as jest.Mock;
 const feedsMock = EmailFeedsListAll as unknown as jest.Mock;
+const tokenIdsMock = EmailFeedIdsListAllForTokens as unknown as jest.Mock;
 const pruneTokensMock = FeedIdentityPruneTokens as unknown as jest.Mock;
 const ensureTokensMock = jest.requireMock("./feeds/FeedIdentity")
   .FeedIdentityEnsureTokens as jest.Mock;
@@ -112,6 +115,9 @@ beforeEach(() => {
   fetchMock.mockResolvedValue(undefined);
   purgeMock.mockResolvedValue(undefined);
   feedsMock.mockReturnValue([]);
+  tokenIdsMock.mockImplementation(() =>
+    feedsMock().map((feed: { feedId: string }) => feed.feedId),
+  );
   timeoutMock.mockResolvedValue(undefined);
   scheduleJobMock.mockImplementation(() => ({ cancel: jest.fn() }));
   (jest.requireMock("./feeds/FeedIdentity").FeedIdentityGetFeedUrlId as jest.Mock).mockReturnValue("feed");

@@ -3,6 +3,7 @@ import {
   COPY_SCRIPT,
   renderFeedArchivePage,
   renderFeedsIndexPage,
+  renderManagePage,
   renderViewPage,
 } from "./HtmlPages";
 
@@ -283,5 +284,92 @@ describe("renderViewPage", () => {
     });
     expect(html).not.toContain("<script");
     expect(html).toContain("aria-label=\"Email navigation\"");
+  });
+});
+
+describe("renderManagePage", () => {
+  function makeModel(overrides: Record<string, unknown> = {}) {
+    return {
+      csrfToken: "a".repeat(64),
+      feeds: [
+        {
+          feedId: "thedaily",
+          titlePlaceholder: "The Daily",
+          senderEmail: "news@example.com",
+          itemCount: 2,
+          hidden: true,
+          mergedInto: "everything",
+          setting: {
+            title: "Daily Brief",
+            hidden: true,
+            maxItems: 3,
+            blockRemoteImages: false,
+          },
+        },
+      ],
+      senders: [{ match: "news@example.com", feedId: "daily-news", title: "News" }],
+      defaults: {
+        maxItems: 200,
+        blockRemoteImages: true,
+        stripTrackingPixels: true,
+      },
+      saved: false,
+      ...overrides,
+    };
+  }
+
+  it("renders the feed form with values, markers and effective defaults", () => {
+    const html = renderManagePage(makeModel());
+    expect(html).toContain('method="post" action="/manage"');
+    expect(html).toContain(`name="csrf" value="${"a".repeat(64)}"`);
+    expect(html).toContain('name="feed.thedaily.title" value="Daily Brief"');
+    expect(html).toContain("(hidden)");
+    expect(html).toContain("(merged into everything)");
+    expect(html).toContain('name="feed.thedaily.maxItems"');
+    expect(html).toContain('placeholder="inherit (200)"');
+    expect(html).toContain("2 retained email(s)");
+    expect(html).toContain(
+      '<option value="false" selected>off</option>',
+    );
+    expect(html).not.toContain("<script");
+  });
+
+  it("escapes injected values from settings and sender data", () => {
+    const html = renderManagePage(
+      makeModel({
+        feeds: [
+          {
+            feedId: "thedaily",
+            titlePlaceholder: '<b>"Daily"</b>',
+            hidden: false,
+            setting: { title: '<img src=x onerror="alert(1)">' },
+          },
+        ],
+        senders: [
+          {
+            match: '<script>alert(1)</script>',
+            feedId: "daily-news",
+            title: "& < >",
+          },
+        ],
+        error: '<script>bad</script>',
+      }),
+    );
+    expect(html).not.toContain('<img src=x');
+    expect(html).not.toContain('<script>alert(1)</script>');
+    expect(html).not.toContain("<script>bad</script>");
+    expect(html).toContain("&lt;img src=x");
+    expect(html).toContain("&lt;script&gt;bad&lt;/script&gt;");
+    expect(html).toContain("&amp; &lt; &gt;");
+    expect(html).toContain('role="alert"');
+  });
+
+  it("shows the saved notice only after a successful save", () => {
+    expect(renderManagePage(makeModel())).not.toContain(
+      "Feed settings saved and applied",
+    );
+    expect(renderManagePage(makeModel({ saved: true }))).toContain(
+      "Feed settings saved and applied",
+    );
   });
 });

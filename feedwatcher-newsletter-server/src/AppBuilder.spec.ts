@@ -20,6 +20,7 @@ import {
   FeedIdentityGetFeedUrlId,
   FeedIdentityInit,
 } from "./feeds/FeedIdentity";
+import { FeedSettingsSave } from "./feeds/FeedSettings";
 
 const DAILY_ID = "11111111-1111-4111-8111-111111111111";
 const DAILY_2_ID = "22222222-2222-4222-8222-222222222222";
@@ -302,6 +303,49 @@ describe("feed catalogue", () => {
         feed.feedUrl.startsWith("https://feeds.example.com/rss/"),
       ),
     ).toBe(true);
+  });
+
+  it("omits hidden feeds and counts merged sources in the target", async () => {
+    try {
+      FeedSettingsSave({
+        version: 1,
+        feeds: { morningbrew: { mergeInto: "thedaily" } },
+      });
+      const merged = await build(makeConfig()).inject({
+        method: "GET",
+        url: "/api/feeds",
+      });
+      const mergedCatalogue = merged.json() as {
+        feeds: { feedId: string; itemCount: number; title: string }[];
+      };
+      expect(mergedCatalogue.feeds.map((feed) => feed.feedId)).toEqual([
+        "thedaily",
+      ]);
+      expect(mergedCatalogue.feeds[0].itemCount).toBe(4);
+
+      FeedSettingsSave({
+        version: 1,
+        feeds: {
+          morningbrew: { mergeInto: "thedaily" },
+          thedaily: { hidden: true },
+        },
+      });
+      const hidden = await build(makeConfig()).inject({
+        method: "GET",
+        url: "/api/feeds",
+      });
+      expect((hidden.json() as { feeds: unknown[] }).feeds).toEqual([]);
+
+      const index = await build(makeConfig()).inject({
+        method: "GET",
+        url: "/rss/",
+        headers: { accept: "text/html" },
+      });
+      expect(index.body).not.toContain("The Daily");
+      expect(index.body).not.toContain("Morning Brew");
+    } finally {
+      FeedSettingsSave({ version: 1, feeds: {} });
+    }
   });
 });
 
@@ -597,6 +641,8 @@ describe("authentication", () => {
       `/rss/${urlId}/archive`,
       `/view/${DAILY_ID}`,
       "/api/feeds",
+      "/api/feeds/settings",
+      "/manage",
     ];
 
     for (const url of paths) {

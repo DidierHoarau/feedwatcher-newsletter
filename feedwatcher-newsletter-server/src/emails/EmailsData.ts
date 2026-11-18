@@ -8,6 +8,13 @@ import {
   FeedIdentityGetTitle,
   FeedIdentityIsSenderIgnored,
 } from "../feeds/FeedIdentity";
+import {
+  FeedSettingsGetForFeed,
+  FeedSettingsGetGeneration,
+  FeedSettingsGetReferencedFeedIds,
+  FeedSettingsIsHidden,
+  FeedSettingsResolveMergeTarget,
+} from "../feeds/FeedSettings";
 import { EmailItem } from "./EmailFetcher";
 import {
   SanitizedBodyCacheEvict,
@@ -25,6 +32,13 @@ export interface FeedSummary {
   latestDate: string;
 }
 
+// Management view of a base feed: it also lists feeds hidden from readers and
+// sources merged into another feed, so the management form is lossless.
+export interface FeedManagementSummary extends FeedSummary {
+  hidden: boolean;
+  mergedInto?: string;
+}
+
 let retentionDays = 3;
 let journalFilePath = "";
 let legacyFilePath = "";
@@ -38,13 +52,16 @@ let itemById = new Map<string, EmailItem>();
 let recordCounts = new Map<string, number>();
 
 // Derived, lazily rebuilt per feed: grouping is pure in-memory work and is
-// invalidated by writes and by feed-identity configuration changes.
+// invalidated by writes and by feed-identity or feed-settings changes.
 interface FeedIndex {
   identityGeneration: number;
+  settingsGeneration: number;
   itemsByFeedId: Map<string, EmailItem[]>;
   summaries: FeedSummary[];
+  managementSummaries: FeedManagementSummary[];
   lastModifiedByFeed: Map<string, number>;
   lastModifiedMs: number;
+  tokenFeedIds: string[];
 }
 
 let feedIndex: FeedIndex | undefined;
@@ -252,10 +269,10 @@ export function EmailItemsBatchSave(items: EmailItem[]): void {
   storeMutationAtMs = Date.now();
   for (const item of items) {
     if (!isUnknownSender(item)) {
-      feedMutationAtMs.set(
+      const feedId = FeedSettingsResolveMergeTarget(
         FeedIdentityGetFeedId(item.senderName, item.senderEmail),
-        Date.now(),
       );
+      feedMutationAtMs.set(feedId, Date.now());
     }
   }
   feedIndex = undefined;
@@ -319,16 +336,33 @@ function warnFeedIdCollisions(
     logger.warn(
       `Feed id "${feedId}" is shared by ${labels.length} distinct senders: ${labels.join(
         ", ",
-      )}; if unintended, separate them with FEED_OVERRIDES`,
+      )}; if unintended, separate them with FEED_OVERRIDES or a feed-settings.json sender rule`,
     );
   }
 }
 
-function buildFeedIndex(identityGeneration: number): FeedIndex {
-  const itemsByFeedId = new Map<string, EmailItem[]>();
+function summaryTitle(feedId: string, latest: EmailItem): string {
+  return (
+    FeedSettingsGetForFeed(feedId)?.title ??
+    FeedIdentityGetTitle(latest.senderName, latest.senderEmail)
+  );
+}
+
+function sortSummaries<T extends FeedSummary>(summaries: T[]): T[] {
+  return summaries.sort(
+    (a, b) => a.title.localeCompare(b.title) || a.feedId.localeCompare(b.feedId),
+  );
+}
+
+function buildFeedIndex(
+  identityGeneration: number,
+  settingsGeneration: number,
+): FeedIndex {
+  // First pass: group by base feed id (the identity-derived id). These groups
+  // back the management view and the collision report even when the feed is
+  // hidden or merged away.
+  const baseItemsByFeedId = new Map<string, EmailItem[]>();
   const sendersByFeedId = new Map<string, Map<string, string>>();
-  const summaries: FeedSummary[] = [];
-  const lastModifiedByFeed = new Map<string, number>();
   let lastModifiedMs = 0;
   for (const item of recordsByMessageId.values()) {
     const timestamp = itemTimestampMs(item);
@@ -338,11 +372,11 @@ function buildFeedIndex(identityGeneration: number): FeedIndex {
     if (isUnknownSender(item)) continue;
     if (FeedIdentityIsSenderIgnored(item.senderName, item.senderEmail)) continue;
     const feedId = FeedIdentityGetFeedId(item.senderName, item.senderEmail);
-    const items = itemsByFeedId.get(feedId);
+    const items = baseItemsByFeedId.get(feedId);
     if (items) {
       items.push(item);
     } else {
-      itemsByFeedId.set(feedId, [item]);
+      baseItemsByFeedId.set(feedId, [item]);
     }
     const senders = sendersByFeedId.get(feedId);
     if (senders) {
@@ -353,44 +387,105 @@ function buildFeedIndex(identityGeneration: number): FeedIndex {
         new Map([[senderIdentity(item), senderLabel(item)]]),
       );
     }
-    const previous = lastModifiedByFeed.get(feedId) || 0;
-    if (timestamp > previous) {
-      lastModifiedByFeed.set(feedId, timestamp);
-    }
   }
   warnFeedIdCollisions(sendersByFeedId);
+
+  const managementSummaries: FeedManagementSummary[] = [];
+  for (const [feedId, items] of baseItemsByFeedId) {
+    items.sort((a, b) => effectiveReceivedMs(b) - effectiveReceivedMs(a));
+    const latest = items[0];
+    managementSummaries.push({
+      feedId,
+      title: summaryTitle(feedId, latest),
+      senderName: latest.senderName,
+      senderEmail: latest.senderEmail,
+      itemCount: items.length,
+      latestDate: EmailItemGetEffectiveDateReceived(latest),
+      hidden: FeedSettingsIsHidden(feedId),
+      mergedInto: FeedSettingsGetForFeed(feedId)?.mergeInto,
+    });
+  }
+  sortSummaries(managementSummaries);
+
+  // Second pass: resolve merges and hidden feeds into the visible final groups.
+  const itemsByFeedId = new Map<string, EmailItem[]>();
+  const lastModifiedByFeed = new Map<string, number>();
+  for (const [baseFeedId, items] of baseItemsByFeedId) {
+    if (FeedSettingsIsHidden(baseFeedId)) continue;
+    const finalFeedId = FeedSettingsResolveMergeTarget(baseFeedId);
+    // A hidden final target makes the whole group invisible, including a
+    // source that merges into it.
+    if (FeedSettingsIsHidden(finalFeedId)) continue;
+    const targetItems = itemsByFeedId.get(finalFeedId);
+    if (targetItems) {
+      targetItems.push(...items);
+    } else {
+      itemsByFeedId.set(finalFeedId, items.slice());
+    }
+    const baseLastModified = items.reduce(
+      (max, item) => Math.max(max, itemTimestampMs(item)),
+      0,
+    );
+    const previous = lastModifiedByFeed.get(finalFeedId) || 0;
+    if (baseLastModified > previous) {
+      lastModifiedByFeed.set(finalFeedId, baseLastModified);
+    }
+  }
+
+  const summaries: FeedSummary[] = [];
   for (const [feedId, items] of itemsByFeedId) {
     items.sort((a, b) => effectiveReceivedMs(b) - effectiveReceivedMs(a));
     const latest = items[0];
     summaries.push({
       feedId,
-      title: FeedIdentityGetTitle(latest.senderName, latest.senderEmail),
+      title: summaryTitle(feedId, latest),
       senderName: latest.senderName,
       senderEmail: latest.senderEmail,
       itemCount: items.length,
       latestDate: EmailItemGetEffectiveDateReceived(latest),
     });
   }
-  summaries.sort(
-    (a, b) => a.title.localeCompare(b.title) || a.feedId.localeCompare(b.feedId),
-  );
+  sortSummaries(summaries);
+
+  // Preserve tokens of feeds that still exist in any form: base (hidden or
+  // merged sources), final visible targets, and ids only referenced by the
+  // settings file (orphans and merge targets without items).
+  const tokenIds = new Set<string>([
+    ...baseItemsByFeedId.keys(),
+    ...itemsByFeedId.keys(),
+    ...FeedSettingsGetReferencedFeedIds(),
+  ]);
+
   return {
     identityGeneration,
+    settingsGeneration,
     itemsByFeedId,
     summaries,
+    managementSummaries,
     lastModifiedByFeed,
     lastModifiedMs,
+    tokenFeedIds: [...tokenIds].sort(),
   };
 }
 
 function ensureFeedIndex(): FeedIndex {
   const identityGeneration = FeedIdentityGetGeneration();
-  if (feedIndex && feedIndex.identityGeneration === identityGeneration) {
+  const settingsGeneration = FeedSettingsGetGeneration();
+  if (
+    feedIndex &&
+    feedIndex.identityGeneration === identityGeneration &&
+    feedIndex.settingsGeneration === settingsGeneration
+  ) {
     return feedIndex;
   }
-  const rebuilt = feedIndex !== undefined;
-  feedIndex = buildFeedIndex(identityGeneration);
-  if (rebuilt) {
+  // A settings change can fix or introduce a collision: let the warning fire
+  // again. Identity re-inits keep their memo so frequent rebuilds stay quiet.
+  if (feedIndex && feedIndex.settingsGeneration !== settingsGeneration) {
+    loggedCollisions = new Set();
+  }
+  const previous = feedIndex;
+  feedIndex = buildFeedIndex(identityGeneration, settingsGeneration);
+  if (previous) {
     // A configuration reload can change grouping without a write: move both
     // validator timestamps so cached responses are revalidated.
     const now = Date.now();
@@ -402,9 +497,23 @@ function ensureFeedIndex(): FeedIndex {
   return feedIndex;
 }
 
-// One summary per feed, grouped by the override-aware feed id.
+// One summary per visible final feed: hidden feeds and merged sources are
+// omitted, merged sources' items are counted in the target.
 export function EmailFeedsListAll(): FeedSummary[] {
-  return ensureFeedIndex().summaries.slice();
+  return ensureFeedIndex().summaries.map((summary) => ({ ...summary }));
+}
+
+// Every base feed, including hidden feeds and merged sources, for /manage.
+export function EmailFeedsListAllForManagement(): FeedManagementSummary[] {
+  return ensureFeedIndex().managementSummaries.map((summary) => ({
+    ...summary,
+  }));
+}
+
+// Feed ids whose tokens must be preserved: all base and final feeds plus ids
+// only referenced by feed-settings.json.
+export function EmailFeedIdsListAllForTokens(): string[] {
+  return ensureFeedIndex().tokenFeedIds.slice();
 }
 
 export function EmailItemsListById(id: string): EmailItem[] {
@@ -479,7 +588,9 @@ export async function EmailsDataPurgeExpired(): Promise<void> {
     expiredItemIds.push(item.id);
     if (!isUnknownSender(item)) {
       affectedFeedIds.add(
-        FeedIdentityGetFeedId(item.senderName, item.senderEmail),
+        FeedSettingsResolveMergeTarget(
+          FeedIdentityGetFeedId(item.senderName, item.senderEmail),
+        ),
       );
     }
   }
